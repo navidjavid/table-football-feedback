@@ -1,0 +1,42 @@
+# ==========================================
+# C/C++ & Pico SDK Build Artifacts
+# ==========================================
+/build/
+*.o
+*.obj
+*.out
+*.elf
+*.hex
+*.bin
+*.uf2
+*.map
+*.dis
+
+# ==========================================
+# CMake Files
+# ==========================================
+CMakeCache.txt
+CMakeFiles/
+Makefile
+cmake_install.cmake
+*.cmake
+
+# ==========================================
+# VS Code Configuration
+# ==========================================
+# Ignore CMake Tools cache inside VS Code
+.vscode/.cmake/
+.vscode/ipch/
+# Note: We intentionally do NOT ignore .vscode/settings.json or .vscode/launch.json 
+# so your team can share the same debugging and formatting settings.
+
+# ==========================================
+# OS Generated Files
+# ==========================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
