@@ -1,1 +1,2 @@
-// Score tracking and fastest shot math
+#include "game_logic.h"
+// TODO: implement
