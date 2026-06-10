@@ -18,3 +18,4 @@ typedef struct {
 
 void i2c_comms_init(void);
 void i2c_comms_poll(BallData *out);
+void i2c_comms_flush(void);

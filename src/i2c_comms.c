@@ -74,3 +74,8 @@ void i2c_comms_poll(BallData *out) {
         return;
     }
 }
+
+// Flush ring buffer — call before a new game starts to clear stale bytes
+void i2c_comms_flush(void) {
+    _tail = _head;
+}

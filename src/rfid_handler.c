@@ -1,5 +1,5 @@
 #include "rfid_handler.h"
-#include "../lib/mfrc522/mfrc522.h"
+#include "../lib/pn532/pn532.h"
 #include "pico/stdlib.h"
 #include "hardware/irq.h"
 #include "hardware/regs/intctrl.h"
@@ -13,30 +13,30 @@
 
 #define NO_CARD_THRESHOLD  3
 
-static bool    _tap_active   = false;
-static int     _no_card      = 0;
-static bool    _fired        = false;
-static uint8_t _last_uid[4]  = {0};
+static bool    _tap_active  = false;
+static int     _no_card     = 0;
+static bool    _fired       = false;
+static uint8_t _last_uid[4] = {0};
 
 void rfid_handler_init(void) {
-    RC522Config cfg = {
+    PN532Config cfg = {
         .spi = spi1, .pin_sck = RFID_SCK, .pin_mosi = RFID_MOSI,
         .pin_miso = RFID_MISO, .pin_cs = RFID_CS, .pin_rst = RFID_RST,
     };
-    rc522_init(&cfg);
+    pn532_init(&cfg);
 }
 
 void rfid_handler_scan(RFIDScanResult *out) {
     out->result = RFID_NONE;
     memset(out->uid, 0, 4);
 
-    // Disable I2C IRQ during RFID transaction — clone is timing sensitive
+    // Disable I2C IRQ during RFID SPI transaction
     irq_set_enabled(I2C0_IRQ, false);
     uint8_t uid[4];
-    int status = rc522_read_card(uid);
+    int status = pn532_read_card(uid);
     irq_set_enabled(I2C0_IRQ, true);
 
-    if (status == RC522_OK) {
+    if (status == PN532_OK) {
         _no_card = 0;
 
         if (!_tap_active) {
@@ -47,7 +47,7 @@ void rfid_handler_scan(RFIDScanResult *out) {
         if (!_fired) {
             _fired = true;
             irq_set_enabled(I2C0_IRQ, false);
-            rc522_halt();
+            pn532_halt();
             irq_set_enabled(I2C0_IRQ, true);
 
             memcpy(out->uid, uid, 4);

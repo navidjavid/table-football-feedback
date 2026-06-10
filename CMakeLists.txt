@@ -25,21 +25,21 @@ pico_sdk_init()
 
 set(COMMON_INCLUDES
     ${CMAKE_CURRENT_LIST_DIR}/include
-    ${CMAKE_CURRENT_LIST_DIR}/lib/mfrc522
+    ${CMAKE_CURRENT_LIST_DIR}/lib/pn532
     ${CMAKE_CURRENT_LIST_DIR}/lib/ea_dogl128
 )
 
-# --- mfrc522 driver library ---
-add_library(mfrc522_lib STATIC lib/mfrc522/mfrc522.c)
-target_include_directories(mfrc522_lib PUBLIC ${CMAKE_CURRENT_LIST_DIR}/lib/mfrc522)
-target_link_libraries(mfrc522_lib pico_stdlib hardware_spi)
+# --- PN532 RFID driver ---
+add_library(pn532_lib STATIC lib/pn532/pn532.c)
+target_include_directories(pn532_lib PUBLIC ${CMAKE_CURRENT_LIST_DIR}/lib/pn532)
+target_link_libraries(pn532_lib pico_stdlib hardware_spi)
 
-# --- display driver library ---
+# --- Display driver ---
 add_library(ea_dogl128_lib STATIC lib/ea_dogl128/ea_dogl128.c)
 target_include_directories(ea_dogl128_lib PUBLIC ${CMAKE_CURRENT_LIST_DIR}/lib/ea_dogl128)
 target_link_libraries(ea_dogl128_lib pico_stdlib)
 
-# --- main application ---
+# --- Main application ---
 add_executable(table-football
     src/main.c
     src/rfid_handler.c
@@ -56,7 +56,7 @@ target_link_libraries(table-football
     hardware_spi
     hardware_i2c
     pico_i2c_slave
-    mfrc522_lib
+    pn532_lib
     ea_dogl128_lib
 )
 pico_add_extra_outputs(table-football)
@@ -66,9 +66,5 @@ add_executable(test_i2c_simulator tests/test_i2c_simulator.c)
 target_include_directories(test_i2c_simulator PRIVATE ${COMMON_INCLUDES})
 pico_enable_stdio_uart(test_i2c_simulator 0)
 pico_enable_stdio_usb(test_i2c_simulator 1)
-target_link_libraries(test_i2c_simulator
-    pico_stdlib
-    hardware_i2c
-    m
-)
+target_link_libraries(test_i2c_simulator pico_stdlib hardware_i2c m)
 pico_add_extra_outputs(test_i2c_simulator)
