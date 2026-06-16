@@ -24,6 +24,7 @@ project(table-football C CXX ASM)
 pico_sdk_init()
 
 set(COMMON_INCLUDES
+    ${CMAKE_CURRENT_LIST_DIR}           # lwipopts.h lives here
     ${CMAKE_CURRENT_LIST_DIR}/include
     ${CMAKE_CURRENT_LIST_DIR}/lib/pn532
     ${CMAKE_CURRENT_LIST_DIR}/lib/ea_dogl128
@@ -36,7 +37,8 @@ target_link_libraries(pn532_lib pico_stdlib hardware_spi)
 
 # --- Display driver ---
 add_library(ea_dogl128_lib STATIC lib/ea_dogl128/ea_dogl128.c)
-target_include_directories(ea_dogl128_lib PUBLIC ${CMAKE_CURRENT_LIST_DIR}/lib/ea_dogl128)
+target_include_directories(ea_dogl128_lib PUBLIC
+    ${CMAKE_CURRENT_LIST_DIR}/lib/ea_dogl128)
 target_link_libraries(ea_dogl128_lib pico_stdlib)
 
 # --- Main application ---
@@ -58,6 +60,7 @@ target_link_libraries(table-football
     pico_i2c_slave
     pn532_lib
     ea_dogl128_lib
+    pico_cyw43_arch_lwip_poll   # WiFi + lwIP in polling mode
 )
 pico_add_extra_outputs(table-football)
 
