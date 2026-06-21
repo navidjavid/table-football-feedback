@@ -1,0 +1,418 @@
+We have a Raspberry Pi Pico 2 W table football feedback project and a Raspberry Pi server.
+
+Current Pico firmware:
+- src/main.c connects to Wi-Fi.
+- It sends HTTP POST requests to SERVER_IP:SERVER_PORT at endpoint /update.
+- send_state(const GameData *g) currently sends live game JSON.
+- RFID scanning is handled in src/rfid_handler.c.
+- Game logic is handled in src/game_logic.c.
+- GameData contains player names, player RFID UIDs, score, fastest shot, state, and winner.
+- The Pico should keep the game logic. The Raspberry Pi server should handle dashboard, database, registration, and player history.
+
+Goal:
+Implement a Raspberry Pi Flask server with SQLite database and one-page dashboard.
+
+The dashboard must include only:
+1. Live Match section
+2. All Players list
+3. Player Profile dialog with match history
+4. Register Guest dialog
+
+Do NOT include:
+- Leaderboard
+- Recent matches section on main dashboard
+- Total shots
+- Last goal
+- Possession
+- Ball position
+
+Part 1: Server folder structure
+
+Create:
+
+server/
+├── app.py
+├── football.db
+├── templates/
+│   └── index.html
+├── static/
+│   ├── style.css
+│   └── script.js
+└── README.md
+
+Use Python Flask and SQLite.
+
+The Flask app must run with:
+
+app.run(host="0.0.0.0", port=5000, debug=True)
+
+Part 2: SQLite database
+
+Create tables automatically if they do not exist.
+
+Table: players
+
+Columns:
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- rfid_uid TEXT UNIQUE NOT NULL
+- name TEXT NOT NULL
+- is_guest INTEGER NOT NULL DEFAULT 1
+- created_at TEXT NOT NULL
+
+Table: matches
+
+Columns:
+- id INTEGER PRIMARY KEY AUTOINCREMENT
+- player1_id INTEGER NOT NULL
+- player2_id INTEGER NOT NULL
+- score1 INTEGER NOT NULL
+- score2 INTEGER NOT NULL
+- winner_id INTEGER
+- fastest_shot REAL
+- started_at TEXT
+- ended_at TEXT
+
+Table: live_state
+
+Columns:
+- id INTEGER PRIMARY KEY CHECK(id = 1)
+- state TEXT
+- player1_id INTEGER
+- player2_id INTEGER
+- score1 INTEGER
+- score2 INTEGER
+- fastest_shot REAL
+- winner_id INTEGER
+- updated_at TEXT
+
+Part 3: Pico JSON format
+
+Modify src/main.c send_state() if needed so Pico sends this JSON to POST /update:
+
+During game:
+
+{
+  "state": "GAME_PLAYING",
+  "p1": "Guest",
+  "p1_uid": "DBEF7005",
+  "p2": "Guest",
+  "p2_uid": "4C069804",
+  "score_a": 3,
+  "score_b": 2,
+  "fastest": 12.4,
+  "winner": "",
+  "winner_uid": "",
+  "time": 80
+}
+
+When finished:
+
+{
+  "state": "GAME_OVER",
+  "p1": "Sara",
+  "p1_uid": "DBEF7005",
+  "p2": "Ali",
+  "p2_uid": "4C069804",
+  "score_a": 5,
+  "score_b": 3,
+  "fastest": 12.4,
+  "winner": "Sara",
+  "winner_uid": "DBEF7005",
+  "time": 160
+}
+
+RFID UID must be sent as uppercase hex string without spaces.
+
+Part 4: Server endpoint POST /update
+
+Implement POST /update.
+
+Behavior:
+- Receive JSON from Pico.
+- Read p1_uid and p2_uid.
+- For each UID:
+  - If player exists, use existing player.
+  - If player does not exist, create guest player automatically.
+  - Guest names should be Guest1, Guest2, Guest3, etc.
+- Update live_state table with:
+  - state
+  - player1_id
+  - player2_id
+  - score1
+  - score2
+  - fastest_shot
+  - winner_id
+  - updated_at
+- If winner_uid exists, map it to winner_id.
+- If state is GAME_OVER, save one match in matches table.
+- Avoid saving the same finished match repeatedly, because the Pico may continue sending GAME_OVER every second.
+- Use a simple duplicate protection:
+  - Save a GAME_OVER match only if the last saved match does not have the same player1_id, player2_id, score1, score2, and ended_at within the last few seconds.
+  - Or track previous live_state transition from non-GAME_OVER to GAME_OVER.
+
+Part 5: API endpoint GET /api/live
+
+Return current live match state using database player names.
+
+Example response:
+
+{
+  "state": "GAME_PLAYING",
+  "player1": {
+    "id": 1,
+    "name": "Sara",
+    "rfid_uid": "DBEF7005",
+    "is_guest": false
+  },
+  "player2": {
+    "id": 2,
+    "name": "Ali",
+    "rfid_uid": "4C069804",
+    "is_guest": false
+  },
+  "score1": 3,
+  "score2": 2,
+  "fastest_shot": 12.4,
+  "winner": null,
+  "updated_at": "2026-06-21 12:45:30"
+}
+
+If no live match exists, return default values:
+- state: "WAITING"
+- score1: 0
+- score2: 0
+- fastest_shot: 0
+- winner: null
+
+Part 6: API endpoint GET /api/players
+
+Return all players with calculated statistics.
+
+Each player object:
+
+{
+  "id": 1,
+  "name": "Sara",
+  "rfid_uid": "DBEF7005",
+  "is_guest": false,
+  "games": 5,
+  "wins": 3,
+  "losses": 2,
+  "best_shot": 12.4,
+  "status": "Active"
+}
+
+Statistics:
+- games = number of matches where player is player1 or player2
+- wins = number of matches where winner_id = player id
+- losses = games - wins
+- best_shot = maximum fastest_shot from matches where player participated
+- status = "Active" if player is currently player1 or player2 in live_state and state is GAME_PLAYING, otherwise "Offline"
+
+Part 7: API endpoint GET /api/player/<player_id>
+
+Return one player profile with previous matches.
+
+Response:
+
+{
+  "id": 1,
+  "name": "Sara",
+  "rfid_uid": "DBEF7005",
+  "is_guest": false,
+  "games": 5,
+  "wins": 3,
+  "losses": 2,
+  "best_shot": 12.4,
+  "matches": [
+    {
+      "date": "21 Jun 2026 14:30",
+      "opponent": "Ali",
+      "score": "5 - 3",
+      "result": "Win",
+      "fastest_shot": 12.4
+    },
+    {
+      "date": "20 Jun 2026 16:10",
+      "opponent": "Max",
+      "score": "2 - 5",
+      "result": "Loss",
+      "fastest_shot": 11.1
+    }
+  ]
+}
+
+The matches array should only include matches where this player participated.
+Sort newest first.
+Limit to the latest 10 or 20 matches.
+
+Part 8: API endpoint POST /api/register-player
+
+Input:
+
+{
+  "player_id": 3,
+  "name": "Sara"
+}
+
+Behavior:
+- Find the player by id.
+- Update the same row:
+  - name = provided name
+  - is_guest = 0
+- Do not create a new player.
+- Keep all previous matches and statistics.
+- Return updated player data.
+
+Validate:
+- name must not be empty
+- name should be trimmed
+- if another registered player already uses the same name, return an error
+
+Part 9: Frontend page GET /
+
+Build a single HTML page.
+
+Layout:
+- Dark modern dashboard
+- Header:
+  - Table Football Live Dashboard
+  - System Online
+  - Current time or last update
+
+Section 1: Live Match card
+Show:
+- Player 1 name
+- Player 2 name
+- Score
+- Status
+- Fastest Shot
+- Winner
+
+Do not show:
+- possession
+- total shots
+- last goal
+- ball position
+
+Section 2: All Players list
+Use a table-like layout.
+
+Columns:
+- Player
+- RFID UID
+- Games
+- Wins
+- Best Shot
+- Status
+
+Each row should be clickable.
+Clicking a player row opens the player profile dialog.
+
+Guest players should have a small "Guest" badge.
+Registered players should have a small "Registered" badge.
+
+Part 10: Player profile dialog
+
+When clicking a player row:
+- JavaScript calls GET /api/player/<player_id>
+- Show modal dialog with:
+  - Name
+  - Registered/Guest badge
+  - RFID UID
+  - Games
+  - Wins
+  - Losses
+  - Best Shot
+  - Match History table
+
+Match History table columns:
+- Date
+- Match
+- Score
+- Result
+- Fastest Shot
+
+Example:
+21 Jun 2026 14:30 | Sara vs Ali | 5 - 3 | Win | 12.4 km/h
+
+If the player is a guest:
+- Show button: "Register This Player"
+- Clicking it opens the register dialog for this player.
+
+Part 11: Register dialog
+
+Register dialog fields:
+- RFID UID, read-only
+- Current name, read-only
+- New player name, input
+- Cancel button
+- Save button
+
+On Save:
+- Call POST /api/register-player
+- Close register dialog
+- Refresh:
+  - players list
+  - live match
+  - profile dialog if it is still open
+
+Important:
+If Guest1 is registered as Sara, do not create a new player.
+Update the existing Guest1 row.
+All history must remain connected.
+
+Part 12: JavaScript behavior
+
+In static/script.js:
+- Poll GET /api/live every 1 second.
+- Poll GET /api/players every 3 seconds.
+- Implement:
+  - loadLive()
+  - loadPlayers()
+  - openPlayerProfile(playerId)
+  - openRegisterDialog(player)
+  - submitRegistration()
+  - closeModal()
+
+Use fetch().
+No frontend framework.
+Plain JavaScript only.
+
+Part 13: CSS style
+
+In static/style.css:
+- Dark background
+- Card layout
+- Rounded corners
+- Green accent for active status
+- Purple accent for fastest shot
+- Red/blue player colors
+- Modal dialog centered or side panel
+- Table rows hover effect
+- Guest badge yellow
+- Registered badge green
+
+Part 14: README
+
+Create server/README.md with:
+
+Setup:
+cd server
+python3 -m venv venv
+source venv/bin/activate
+pip install flask
+python app.py
+
+Open:
+http://<raspberry-pi-ip>:5000
+
+Pico should send to:
+http://<raspberry-pi-ip>:5000/update
+
+Part 15: Keep implementation simple
+
+This is a university prototype.
+Avoid complex frameworks.
+Use Flask, SQLite, HTML, CSS, and plain JavaScript.
+Code should be readable and easy to explain.
