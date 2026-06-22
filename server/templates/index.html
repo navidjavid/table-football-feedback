@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Table Football — Live</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Table Football</div>
+    <div class="status">
+      <span class="dot dot-ok" id="conn-dot"></span>
+      <span id="conn-text">Connecting...</span>
+      <span class="sep">·</span>
+      <span id="last-update">—</span>
+    </div>
+    <div class="topbar-actions">
+      <a href="/admin" class="link-muted">Admin</a>
+    </div>
+  </header>
+
+  <main class="page">
+    <section>
+      <h2>Live Tables</h2>
+      <div id="tables" class="tables-grid">
+        <!-- table cards rendered by script.js -->
+      </div>
+    </section>
+
+    <section>
+      <h2>All Players</h2>
+      <div class="card">
+        <table class="player-table" id="players-table">
+          <thead>
+            <tr>
+              <th>Player</th>
+              <th>RFID UID</th>
+              <th class="num">Games</th>
+              <th class="num">Wins</th>
+              <th class="num">Losses</th>
+              <th class="num">Best Shot</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Player profile modal -->
+  <div class="modal hidden" id="profile-modal" aria-hidden="true">
+    <div class="modal-panel" role="dialog" aria-modal="true">
+      <button class="modal-close" data-close>×</button>
+      <div id="profile-body"></div>
+    </div>
+  </div>
+
+  <!-- Register dialog -->
+  <div class="modal hidden" id="register-modal" aria-hidden="true">
+    <div class="modal-panel narrow" role="dialog" aria-modal="true">
+      <button class="modal-close" data-close>×</button>
+      <h3>Register Player</h3>
+      <form id="register-form">
+        <label>RFID UID
+          <input type="text" id="reg-uid" readonly />
+        </label>
+        <label>Current name
+          <input type="text" id="reg-current" readonly />
+        </label>
+        <label>New name
+          <input type="text" id="reg-new" maxlength="40" required autofocus />
+        </label>
+        <div class="form-error" id="reg-error"></div>
+        <div class="form-actions">
+          <button type="button" data-close class="btn btn-ghost">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

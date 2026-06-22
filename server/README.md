@@ -1,456 +1,190 @@
-# Server Dashboard Plan
+# Table Football — Raspberry Pi Server
 
-This folder is reserved for the Raspberry Pi server implementation.
+The Raspberry Pi 4 acts as the central hub for the table football
+project. It runs as a WiFi hotspot, MQTT broker, Flask web server, and
+SQLite database, all starting automatically on boot.
 
-The current project already has Pico firmware that sends live game data to a server endpoint using HTTP POST. The next step is to implement the Raspberry Pi side here.
+```
++----------------+        +-------------+         +-------------+
+| Pico Side A    |  MQTT  |             |  SSE    | Phone /     |
+| (RFID, LCD)    | <----> |   Pi 4      | ------> | Browser     |
++----------------+        |             |         +-------------+
+                          | mosquitto   |
++----------------+        | flask app   |
+| Pico Side B    |  MQTT  | sqlite (WAL)|
+| (RFID, LCD)    | <----> |             |
++----------------+        +-------------+
 
-## Final Dashboard Scope
+Hotspot: SSID "TableFootball"  -  192.168.4.1
+Browser: http://192.168.4.1:5000
+MQTT:    192.168.4.1:1883
+```
 
-The dashboard should stay simple and use only one page.
+## What this folder contains
 
-It should include:
-
-- Live Match section
-- All Players list
-- Player Profile dialog with match history
-- Register Guest dialog
-
-It should not include:
-
-- Leaderboard
-- Recent matches section on the main dashboard
-- Total shots
-- Last goal
-- Possession
-- Ball position
-
-## Desired Server Folder Structure
-
-```text
+```
 server/
-├── app.py
-├── football.db              # generated automatically
-├── templates/
-│   └── index.html
-├── static/
-│   ├── style.css
-│   └── script.js
-└── README.md
+├── app.py              Flask app + HTTP routes + SSE + startup wiring
+├── mqtt_client.py      MQTT subscribe/publish + game-state handlers
+├── database.py         All SQLite access (thread-local connections, WAL)
+├── state.py            In-memory live snapshots + SSE fan-out
+├── config.py           Loads .env, configures rotating-file logging
+├── requirements.txt    Python deps
+├── .env.example        Copy to .env and fill in
+├── templates/          Jinja templates (dashboard, player, admin)
+├── static/             CSS + JS
+├── tests/              MQTT simulators for testing without real Picos
+├── scripts/            setup_hotspot.sh, backup_db.sh
+└── systemd/            football.service unit + ops notes
 ```
 
-## System Idea
+## Hardware list
 
-The Pico keeps the embedded game logic:
+- Raspberry Pi 4 (any RAM tier) with Raspberry Pi OS **Bookworm**
+- microSD card (16 GB+)
+- 5 V / 3 A USB-C power supply
+- Two Raspberry Pi Pico 2 W per table (firmware lives in `../src`)
 
-- RFID scan
-- I2C game/ball data reception
-- score calculation
-- fastest shot calculation
-- winner detection
-- display handling
-- sending live game state to the Raspberry Pi server
+## Setup (one-shot, ~10 min)
 
-The Raspberry Pi server handles:
+```bash
+# 1. Flash Raspberry Pi OS Bookworm Lite to the SD card, boot, ssh in.
 
-- SQLite database
-- web dashboard
-- guest player creation
-- player registration
-- player profile/history
-- saving finished matches
+# 2. Hotspot
+sudo bash scripts/setup_hotspot.sh "TableFootball" "football2026"
+# (overrides: setup_hotspot.sh <ssid> <password>)
 
-## Player Flow
+# 3. Mosquitto MQTT broker
+sudo apt update
+sudo apt install -y mosquitto mosquitto-clients sqlite3
+sudo tee /etc/mosquitto/conf.d/football.conf >/dev/null <<'EOF'
+allow_anonymous true
+max_connections 20
+listener 1883 0.0.0.0
+EOF
+sudo systemctl enable mosquitto
+sudo systemctl restart mosquitto
 
-### 1. New RFID tag is scanned
+# 4. Python env
+cd /home/pi/server
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 
-The Pico sends the RFID UID to the server as part of the `/update` JSON.
+# 5. .env
+cp .env.example .env
+python -c "import secrets; print('SECRET_KEY=' + secrets.token_hex(32))" >> .env
+nano .env             # change ADMIN_PASSWORD
 
-Example:
+# 6. systemd
+sudo cp systemd/football.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable football
+sudo systemctl start football
 
-```json
-{
-  "state": "GAME_PLAYING",
-  "p1": "Guest",
-  "p1_uid": "DBEF7005",
-  "p2": "Guest",
-  "p2_uid": "4C069804",
-  "score_a": 3,
-  "score_b": 2,
-  "fastest": 12.4,
-  "winner": "",
-  "winner_uid": "",
-  "time": 80
-}
+# 7. Reboot to confirm everything starts automatically.
+sudo reboot
 ```
 
-### 2. Server checks the database
-
-For each RFID UID:
-
-- If the UID already exists, use the existing player.
-- If the UID does not exist, create a guest player automatically.
-
-Example:
-
-```text
-UID DBEF7005 does not exist
-→ create Guest1
-```
-
-### 3. Guest can play immediately
-
-The dashboard shows the player as `Guest1`.
-
-The guest can play matches and all statistics are saved.
-
-### 4. Guest registers later
-
-The user clicks the guest row in the All Players list.
-
-The Player Profile dialog opens.
-
-If the player is a guest, the dialog shows:
-
-```text
-Register This Player
-```
-
-When clicked, the Register dialog opens:
-
-```text
-RFID UID: DBEF7005
-Current Name: Guest1
-New Name: Sara
-```
-
-After saving:
-
-```text
-Guest1 → Sara
-is_guest = false
-```
-
-Important: do not create a new player. Update the same database row so all old history remains connected.
-
-## Database Design
-
-Use SQLite.
-
-### players
-
-```sql
-CREATE TABLE IF NOT EXISTS players (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    rfid_uid TEXT UNIQUE NOT NULL,
-    name TEXT NOT NULL,
-    is_guest INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL
-);
-```
-
-### matches
-
-```sql
-CREATE TABLE IF NOT EXISTS matches (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    player1_id INTEGER NOT NULL,
-    player2_id INTEGER NOT NULL,
-    score1 INTEGER NOT NULL,
-    score2 INTEGER NOT NULL,
-    winner_id INTEGER,
-    fastest_shot REAL,
-    started_at TEXT,
-    ended_at TEXT
-);
-```
-
-### live_state
-
-```sql
-CREATE TABLE IF NOT EXISTS live_state (
-    id INTEGER PRIMARY KEY CHECK(id = 1),
-    state TEXT,
-    player1_id INTEGER,
-    player2_id INTEGER,
-    score1 INTEGER,
-    score2 INTEGER,
-    fastest_shot REAL,
-    winner_id INTEGER,
-    updated_at TEXT
-);
-```
-
-## Required API Endpoints
-
-### `POST /update`
-
-Receives data from the Pico.
-
-Behavior:
-
-- Read `p1_uid` and `p2_uid`.
-- Find or create players.
-- Update `live_state`.
-- If `state == GAME_OVER`, save a match in `matches`.
-- Avoid saving the same finished match repeatedly, because the Pico may send `GAME_OVER` every second.
-
-### `GET /api/live`
-
-Returns current live match information.
-
-Example:
-
-```json
-{
-  "state": "GAME_PLAYING",
-  "player1": {
-    "id": 1,
-    "name": "Sara",
-    "rfid_uid": "DBEF7005",
-    "is_guest": false
-  },
-  "player2": {
-    "id": 2,
-    "name": "Ali",
-    "rfid_uid": "4C069804",
-    "is_guest": false
-  },
-  "score1": 3,
-  "score2": 2,
-  "fastest_shot": 12.4,
-  "winner": null,
-  "updated_at": "2026-06-21 12:45:30"
-}
-```
-
-### `GET /api/players`
-
-Returns all players with calculated statistics.
-
-Each player should include:
-
-```json
-{
-  "id": 1,
-  "name": "Sara",
-  "rfid_uid": "DBEF7005",
-  "is_guest": false,
-  "games": 5,
-  "wins": 3,
-  "losses": 2,
-  "best_shot": 12.4,
-  "status": "Active"
-}
-```
-
-Statistics:
-
-- `games`: number of matches where player is player1 or player2
-- `wins`: number of matches where winner_id is this player
-- `losses`: games - wins
-- `best_shot`: maximum fastest_shot from matches where this player participated
-- `status`: Active if currently player1 or player2 in live_state and game is running, otherwise Offline
-
-### `GET /api/player/<player_id>`
-
-Returns one player profile and previous match history.
-
-Example:
-
-```json
-{
-  "id": 1,
-  "name": "Sara",
-  "rfid_uid": "DBEF7005",
-  "is_guest": false,
-  "games": 5,
-  "wins": 3,
-  "losses": 2,
-  "best_shot": 12.4,
-  "matches": [
-    {
-      "date": "21 Jun 2026 14:30",
-      "opponent": "Ali",
-      "score": "5 - 3",
-      "result": "Win",
-      "fastest_shot": 12.4
-    }
-  ]
-}
-```
-
-The matches array should only include matches where this player participated. Sort newest first.
-
-### `POST /api/register-player`
-
-Registers a guest player.
-
-Input:
-
-```json
-{
-  "player_id": 3,
-  "name": "Sara"
-}
-```
-
-Behavior:
-
-- Find the player by ID.
-- Update the same row.
-- Set `name` to the entered name.
-- Set `is_guest = 0`.
-- Do not create a new player.
-- Keep all previous matches and statistics.
-
-Validation:
-
-- Name must not be empty.
-- Trim spaces.
-- If another registered player already uses the same name, return an error.
-
-## Frontend Requirements
-
-Use plain HTML, CSS, and JavaScript.
-
-No React, no Vue, no complex frontend framework.
-
-### Main Page
-
-The dashboard should have only one page.
-
-Sections:
-
-1. Header
-2. Live Match card
-3. All Players table/list
-
-### Live Match Card
-
-Show:
-
-- Player 1 name
-- Player 2 name
-- Score
-- Status
-- Fastest Shot
-- Winner
-
-Do not show:
-
-- possession
-- total shots
-- last goal
-- ball position
-
-### All Players List
-
-Columns:
-
-- Player
-- RFID UID
-- Games
-- Wins
-- Best Shot
-- Status
-
-Each player row should be clickable.
-
-Clicking a row opens the Player Profile dialog.
-
-Guest players should have a yellow `Guest` badge.
-
-Registered players should have a green `Registered` badge.
-
-### Player Profile Dialog
-
-Show:
-
-- Name
-- Registered/Guest badge
-- RFID UID
-- Games
-- Wins
-- Losses
-- Best Shot
-- Match History table
-
-If the selected player is a guest, show:
-
-```text
-Register This Player
-```
-
-Clicking that opens the Register dialog.
-
-### Register Dialog
-
-Fields:
-
-- RFID UID, read-only
-- Current name, read-only
-- New player name, input
-- Cancel button
-- Save button
-
-On Save:
-
-- Call `POST /api/register-player`
-- Close register dialog
-- Refresh players list
-- Refresh live match
-- Refresh profile dialog if it is still open
-
-## JavaScript Requirements
-
-In `static/script.js`, implement:
-
-- `loadLive()`
-- `loadPlayers()`
-- `openPlayerProfile(playerId)`
-- `openRegisterDialog(player)`
-- `submitRegistration()`
-- `closeModal()`
-
-Polling:
-
-- `/api/live` every 1 second
-- `/api/players` every 3 seconds
-
-Use `fetch()`.
-
-## UI Style
-
-Use a modern dark dashboard style:
-
-- dark background
-- rounded cards
-- green accent for active status
-- purple accent for fastest shot
-- blue/red player colors
-- yellow guest badge
-- green registered badge
-- hover effect on player rows
-- centered or side-panel modal dialog
-
-## Running the Server
+After reboot, connect a phone or laptop to the **TableFootball** WiFi
+and open <http://192.168.4.1:5000>. The admin panel is at
+<http://192.168.4.1:5000/admin>.
+
+## Running in development (on any machine)
 
 ```bash
 cd server
 python3 -m venv venv
-source venv/bin/activate
-pip install flask
+source venv/bin/activate    # on Windows: venv\Scripts\activate
+pip install -r requirements.txt
+cp .env.example .env        # then fill in SECRET_KEY
 python app.py
 ```
 
-Open in browser:
+You'll need a local mosquitto running on `localhost:1883`. On Windows
+you can install one via Chocolatey (`choco install mosquitto`) or run
+the simulators against a Pi over your LAN by setting `MQTT_HOST` in
+`.env`.
 
-```text
-http://<raspberry-pi-ip>:5000
+## Try it without real Picos
+
+In another terminal (with the server already running):
+
+```bash
+# A complete match (heartbeat → register → goals → GAME_OVER)
+python tests/simulate_game.py
+
+# Or piece-by-piece:
+python tests/simulate_heartbeat.py sim-A 1 A primary
+python tests/simulate_rfid.py DBEF7005 A
+python tests/simulate_rfid.py 4C069804 B
 ```
 
-The Pico should send to:
+Open the dashboard while the simulator runs to watch the table card
+update live.
 
-```text
-http://<raspberry-pi-ip>:5000/update
+## MQTT topic cheat-sheet
+
+| Direction | Topic | QoS | Retain | Notes |
+|-----------|-------|-----|--------|-------|
+| Pico → Pi | `tablefootball/pico/<id>/heartbeat`       | 0 | no  | every 5s |
+| Pico → Pi | `tablefootball/pico/<id>/status`          | 1 | yes | LWT, `online:false` |
+| Pico → Pi | `tablefootball/table/<id>/rfid`           | 1 | no  | card taps |
+| Pico → Pi | `tablefootball/table/<id>/state`          | 1 | no  | score / GAME_OVER (primary only) |
+| Pico → Pi | `tablefootball/table/<id>/ball`           | 0 | no  | 10 Hz ball position |
+| Pi → Pico | `tablefootball/pico/<id>/player`          | 1 | no  | response after RFID |
+| Pi → Pico | `tablefootball/table/<id>/sync`           | 1 | yes | canonical table state |
+| Pi → Pico | `tablefootball/pico/<id>/players_list`    | 1 | yes | full {uid, name} list for offline mode |
+| Pi → Pico | `tablefootball/pico/<id>/cmd`             | 1 | no  | identify / reset / message |
+
+Manual probe (handy when wiring up Picos):
+
+```bash
+# Watch every message on the broker.
+mosquitto_sub -h localhost -t 'tablefootball/#' -v
+
+# Fake an RFID tap.
+mosquitto_pub -h localhost -t tablefootball/table/1/rfid \
+  -m '{"v":1,"pico_id":"sim-A","table_id":1,"side":"A","slot":1,"uid":"DBEF7005","event":"card_tapped"}'
 ```
+
+## Daily operations
+
+- **Change the admin password:** edit `.env`, then `sudo systemctl restart football`.
+- **Backup the DB:** run `bash scripts/backup_db.sh` (or wait for the cron entry below).
+- **Daily backups at 04:00:** `crontab -e` and add
+  ```
+  0 4 * * * /home/pi/server/scripts/backup_db.sh
+  ```
+  Backups live in `server/backups/` and are pruned after 7 days.
+- **Tail logs:** `sudo journalctl -u football -f` or `tail -f logs/server.log`.
+
+## Troubleshooting
+
+| Symptom | First thing to check |
+|---------|----------------------|
+| Picos can't see the hotspot | `nmcli con show TableFootball-AP` then `nmcli con up TableFootball-AP` |
+| Dashboard not updating | DevTools → Network → `/events` shows a `text/event-stream` that stays open |
+| MQTT messages not arriving | `mosquitto_sub -h localhost -t 'tablefootball/#' -v` while triggering a tap |
+| Server won't start | `sudo journalctl -u football -n 50` — most often a missing `SECRET_KEY` in `.env` |
+| Players not appearing | confirm `pico_id` in `pico_devices` has a `table_id` assigned (or assign via /admin) |
+| DB locked errors | `PRAGMA journal_mode` should be `wal`: `sqlite3 football.db "PRAGMA journal_mode"` |
+
+## Known limitations (v1)
+
+- Matches played while the Pico is offline are not synced back to the
+  Pi when it reconnects. Offline play is supported on the Pico, but
+  those matches don't reach the history.
+- The server does not serve HTTPS — acceptable on the closed local
+  hotspot, not for public exposure.
+- Admin sessions never expire. Replace the session config (or move to
+  a proper auth library) before exposing the panel outside the LAN.
+
+## Future hooks (already wired)
+
+- **Web NFC player lookup** — `GET /player/<uid>` and
+  `GET /api/player/by-uid/<uid>` are live; a browser-side NFC scan can
+  just navigate to the URL.
+- **Tournaments** — `tournaments`, `tournament_entries`, and
+  `tournament_matches` tables are created on first run. No UI yet, so a
+  later migration is not required.

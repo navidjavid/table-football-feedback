@@ -1,0 +1,23 @@
+[Unit]
+Description=Table Football Flask Server
+After=network-online.target mosquitto.service
+Wants=network-online.target
+Requires=mosquitto.service
+
+[Service]
+Type=simple
+User=pi
+Group=pi
+WorkingDirectory=/home/pi/server
+EnvironmentFile=/home/pi/server/.env
+ExecStart=/home/pi/server/venv/bin/python app.py
+Restart=on-failure
+RestartSec=5
+
+# Tighten down a bit. The service only needs to read/write its own folder.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

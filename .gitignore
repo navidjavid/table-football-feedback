@@ -40,3 +40,19 @@ cmake_install.cmake
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# ==========================================
+# Python / Raspberry Pi server
+# ==========================================
+__pycache__/
+*.py[cod]
+*$py.class
+server/venv/
+server/.venv/
+server/.env
+server/football.db
+server/football.db-journal
+server/football.db-shm
+server/football.db-wal
+server/backups/
+server/logs/

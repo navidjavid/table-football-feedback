@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Admin — Table Football</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body class="centered">
+  <main class="login-card card">
+    <h1>Admin Login</h1>
+    <form id="login-form">
+      <label>Password
+        <input type="password" id="password" required autofocus />
+      </label>
+      <div class="form-error" id="login-error"></div>
+      <div class="form-actions">
+        <a href="/" class="btn btn-ghost">Back</a>
+        <button type="submit" class="btn btn-primary">Sign in</button>
+      </div>
+    </form>
+  </main>
+  <script>
+    document.getElementById("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const pw = document.getElementById("password").value;
+      const err = document.getElementById("login-error");
+      err.textContent = "";
+      try {
+        const r = await fetch("/api/admin/login", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({password: pw}),
+        });
+        if (r.ok) { window.location.href = "/admin"; return; }
+        const data = await r.json().catch(() => ({}));
+        err.textContent = data.error || "Login failed";
+      } catch {
+        err.textContent = "Network error";
+      }
+    });
+  </script>
+</body>
+</html>

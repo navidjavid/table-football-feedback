@@ -1,418 +1,793 @@
-We have a Raspberry Pi Pico 2 W table football feedback project and a Raspberry Pi server.
+=== TABLE FOOTBALL FEEDBACK SYSTEM — RASPBERRY PI SERVER v3 ===
 
-Current Pico firmware:
-- src/main.c connects to Wi-Fi.
-- It sends HTTP POST requests to SERVER_IP:SERVER_PORT at endpoint /update.
-- send_state(const GameData *g) currently sends live game JSON.
-- RFID scanning is handled in src/rfid_handler.c.
-- Game logic is handled in src/game_logic.c.
-- GameData contains player names, player RFID UIDs, score, fastest shot, state, and winner.
-- The Pico should keep the game logic. The Raspberry Pi server should handle dashboard, database, registration, and player history.
+Build a Raspberry Pi 4 server that acts as the central hub for a table
+football feedback project. It runs as a WiFi hotspot, MQTT broker, Flask
+web server, and SQLite database, starting automatically on boot.
 
-Goal:
-Implement a Raspberry Pi Flask server with SQLite database and one-page dashboard.
+=== SYSTEM CONTEXT ===
 
-The dashboard must include only:
-1. Live Match section
-2. All Players list
-3. Player Profile dialog with match history
-4. Register Guest dialog
+Physical setup per table:
+  - Side A Pico 2W: RFID + display + WiFi + I2C slave (ball tracker)
+  - Side B Pico 2W: RFID + display + WiFi + I2C slave (ball tracker)
+  - BOTH Picos receive ball tracking data from the same I2C wire.
+  - Both Picos use ball data for their own local display.
+  - ONLY the primary Pico (role="primary") publishes ball_position MQTT
+    messages to the Pi. The secondary Pico discards ball data after
+    rendering its local display.
+  - Only the primary Pico publishes game state (score, GAME_OVER).
+  - Secondary Pico only publishes: RFID scans and heartbeat.
+  - Both Picos can operate STANDALONE without the Pi (offline mode).
+  - When Pi is available, Picos connect to its hotspot and use MQTT.
+  - When Pi is unreachable, Picos use locally stored player names from
+    flash, run the game, but save no history.
 
-Do NOT include:
-- Leaderboard
-- Recent matches section on main dashboard
-- Total shots
-- Last goal
-- Possession
-- Ball position
+The Raspberry Pi 4:
+  - WiFi hotspot at 192.168.4.1, SSID: "TableFootball", WPA2
+  - DHCP range: 192.168.4.10 – 192.168.4.100
+  - Mosquitto MQTT broker on port 1883
+  - Flask server on port 5000
+  - SQLite database (WAL mode)
+  - All services auto-start on boot via systemd
 
-Part 1: Server folder structure
+Users open http://192.168.4.1:5000 on their phone or laptop.
 
-Create:
+=== TECH STACK ===
+
+  Server:
+    - Python 3.11+
+    - Flask 3.x (threaded=True)
+    - paho-mqtt 2.x
+    - SQLite 3 (WAL mode, foreign keys enforced)
+    - python-dotenv
+    - NO ORM — raw SQL through database.py only
+
+  Frontend:
+    - Plain HTML, CSS, JavaScript
+    - Chart.js from CDN (player profile page only)
+    - Server-Sent Events for all real-time updates
+    - SSE fallback: poll /api/tables every 5 seconds if SSE drops
+    - Ball position shown as moving dot on CSS field visualization
+    - Ball position is NEVER stored in the database — broadcast only
+
+  Real-time transport:
+    - Pico → Pi: MQTT (QoS 1 for RFID/state, QoS 0 for ball position)
+    - Pi → browser: SSE (one-way push, no libraries needed)
+    - Ball position: QoS 0 MQTT → SSE → browser (lossy is fine at 10Hz)
+    - WebRTC: NOT used
+    - UDP: NOT used
+
+=== FOLDER STRUCTURE ===
 
 server/
 ├── app.py
+├── mqtt_client.py
+├── database.py
+├── config.py
+├── state.py
 ├── football.db
+├── .env
+├── .env.example
 ├── templates/
-│   └── index.html
+│   ├── index.html
+│   ├── player.html
+│   ├── admin_login.html
+│   └── admin.html
 ├── static/
 │   ├── style.css
-│   └── script.js
+│   ├── script.js
+│   └── admin.js
+├── tests/
+│   ├── simulate_heartbeat.py
+│   ├── simulate_rfid.py
+│   └── simulate_game.py
+├── scripts/
+│   ├── setup_hotspot.sh
+│   └── backup_db.sh
+├── systemd/
+│   ├── football.service
+│   └── README.md
 └── README.md
 
-Use Python Flask and SQLite.
+=== CONFIG (.env) ===
 
-The Flask app must run with:
+ADMIN_PASSWORD=admin123
+SECRET_KEY=
+DB_PATH=football.db
+MQTT_HOST=localhost
+MQTT_PORT=1883
+LOG_LEVEL=INFO
+MAX_SCORE=10
+PICO_OFFLINE_SEC=30
 
-app.run(host="0.0.0.0", port=5000, debug=True)
+MAX_SCORE is the default win condition (admin can change per table
+via admin panel — store in tables.max_score column, default 10).
 
-Part 2: SQLite database
+=== CONCURRENCY MODEL ===
 
-Create tables automatically if they do not exist.
+Flask runs with threaded=True. paho-mqtt has its own background thread.
 
-Table: players
+Rule 1 — SQLite thread safety:
+  Never share a connection between threads. Use threading.local():
 
-Columns:
-- id INTEGER PRIMARY KEY AUTOINCREMENT
-- rfid_uid TEXT UNIQUE NOT NULL
-- name TEXT NOT NULL
-- is_guest INTEGER NOT NULL DEFAULT 1
-- created_at TEXT NOT NULL
+    _local = threading.local()
+    def get_db():
+        if not hasattr(_local, 'conn'):
+            _local.conn = sqlite3.connect(DB_PATH)
+            _local.conn.row_factory = sqlite3.Row
+            _local.conn.execute("PRAGMA foreign_keys = ON")
+            _local.conn.execute("PRAGMA journal_mode = WAL")
+        return _local.conn
 
-Table: matches
+  All DB access through database.py only. No raw SQL in routes or handlers.
 
-Columns:
-- id INTEGER PRIMARY KEY AUTOINCREMENT
-- player1_id INTEGER NOT NULL
-- player2_id INTEGER NOT NULL
-- score1 INTEGER NOT NULL
-- score2 INTEGER NOT NULL
-- winner_id INTEGER
-- fastest_shot REAL
-- started_at TEXT
-- ended_at TEXT
+Rule 2 — In-memory live state (state.py):
+  Holds live table state and Pico status for fast SSE broadcasting.
+  All reads/writes use a threading.Lock():
 
-Table: live_state
+    _lock = threading.Lock()
+    _live = {}
+    def update_table(table_id, data):
+        with _lock:
+            _live[table_id] = {**_live.get(table_id, {}), **data}
+    def get_table(table_id):
+        with _lock:
+            return dict(_live.get(table_id, {}))
 
-Columns:
-- id INTEGER PRIMARY KEY CHECK(id = 1)
-- state TEXT
-- player1_id INTEGER
-- player2_id INTEGER
-- score1 INTEGER
-- score2 INTEGER
-- fastest_shot REAL
-- winner_id INTEGER
-- updated_at TEXT
+Rule 3 — Data flow:
+  MQTT callback → database.py (write) → state.py (update) → SSE queue
+  Flask routes read from state.py (fast) or database.py (history)
 
-Part 3: Pico JSON format
+Rule 4 — SSE per-client queues:
+  Each connected SSE client gets its own queue.Queue().
+  MQTT handlers push events to all client queues.
+  Protected by the threading.Lock() in state.py.
 
-Modify src/main.c send_state() if needed so Pico sends this JSON to POST /update:
+Rule 5 — Ball position (high frequency):
+  Ball position events from MQTT are pushed directly to SSE queues.
+  They are NOT written to the database.
+  They are NOT written to state.py (too frequent).
+  If SSE client queue is full, drop ball_position events (lossy OK).
 
-During game:
+=== DATABASE ===
 
+Enable on every connection:
+  PRAGMA foreign_keys = ON;
+  PRAGMA journal_mode = WAL;
+
+All timestamps: ISO-8601 UTC strings "YYYY-MM-DD HH:MM:SS"
+Server timestamps every event — never use Pico-reported time.
+
+TABLE: tables
+  id INTEGER PRIMARY KEY AUTOINCREMENT
+  name TEXT NOT NULL
+  location TEXT
+  max_score INTEGER NOT NULL DEFAULT 10
+  created_at TEXT NOT NULL
+
+  Default row: id=1, name="Table 1", max_score=10
+
+TABLE: pico_devices
+  id INTEGER PRIMARY KEY AUTOINCREMENT
+  pico_id TEXT UNIQUE NOT NULL
+  table_id INTEGER REFERENCES tables(id)
+  side TEXT                         -- "A" or "B"
+  role TEXT                         -- "primary" or "secondary"
+  ip_address TEXT
+  firmware_version TEXT
+  last_seen TEXT
+  online INTEGER NOT NULL DEFAULT 0
+  created_at TEXT NOT NULL
+
+TABLE: players
+  id INTEGER PRIMARY KEY AUTOINCREMENT
+  rfid_uid TEXT UNIQUE NOT NULL
+  name TEXT NOT NULL
+  is_guest INTEGER NOT NULL DEFAULT 1
+  created_at TEXT NOT NULL
+  updated_at TEXT
+
+TABLE: live_tables
+  table_id INTEGER PRIMARY KEY REFERENCES tables(id)
+  state TEXT NOT NULL DEFAULT "WAITING"
+  mode TEXT                         -- "1v1" or "2v2" or "mixed"
+  score_a INTEGER NOT NULL DEFAULT 0
+  score_b INTEGER NOT NULL DEFAULT 0
+  max_score INTEGER NOT NULL DEFAULT 10
+  fastest_shot REAL DEFAULT 0
+  winner_side TEXT
+  winner_player_id INTEGER REFERENCES players(id)
+  session_id TEXT
+  started_at TEXT
+  updated_at TEXT
+
+  state values:
+    "WAITING"             -- no players
+    "PLAYERS_REGISTERING" -- at least one player, not yet both sides
+    "GAME_PLAYING"        -- game active
+    "GAME_OVER"           -- won by goals
+    "ABANDONED"           -- ended because a side emptied
+
+TABLE: live_players
+  table_id INTEGER NOT NULL REFERENCES tables(id)
+  team_side TEXT NOT NULL             -- "A" or "B"
+  slot INTEGER NOT NULL               -- 1 or 2
+  player_id INTEGER REFERENCES players(id)
+  rfid_uid TEXT
+  source_pico_id TEXT
+  updated_at TEXT
+  PRIMARY KEY (table_id, team_side, slot)
+
+TABLE: matches
+  id INTEGER PRIMARY KEY AUTOINCREMENT
+  table_id INTEGER NOT NULL REFERENCES tables(id)
+  mode TEXT NOT NULL
+  score_a INTEGER NOT NULL
+  score_b INTEGER NOT NULL
+  winner_side TEXT
+  winner_player_id INTEGER REFERENCES players(id)
+  fastest_shot REAL
+  result_type TEXT NOT NULL DEFAULT "completed"
+                              -- "completed" or "abandoned"
+  started_at TEXT
+  ended_at TEXT
+  session_id TEXT UNIQUE
+
+TABLE: match_players
+  id INTEGER PRIMARY KEY AUTOINCREMENT
+  match_id INTEGER NOT NULL REFERENCES matches(id)
+  player_id INTEGER NOT NULL REFERENCES players(id)
+  team_side TEXT NOT NULL
+  slot INTEGER NOT NULL
+
+TABLE: rfid_events
+  id INTEGER PRIMARY KEY AUTOINCREMENT
+  table_id INTEGER REFERENCES tables(id)
+  pico_id TEXT
+  team_side TEXT
+  slot INTEGER
+  rfid_uid TEXT NOT NULL
+  player_id INTEGER REFERENCES players(id)
+  event_type TEXT                    -- "register", "deregister", "ignored"
+  created_at TEXT NOT NULL
+
+Indexes:
+  CREATE INDEX IF NOT EXISTS idx_matches_table_ended
+    ON matches(table_id, ended_at);
+  CREATE INDEX IF NOT EXISTS idx_match_players_player
+    ON match_players(player_id);
+  CREATE INDEX IF NOT EXISTS idx_match_players_match
+    ON match_players(match_id);
+  CREATE INDEX IF NOT EXISTS idx_rfid_events_table
+    ON rfid_events(table_id, created_at);
+  CREATE INDEX IF NOT EXISTS idx_live_players_table
+    ON live_players(table_id);
+
+Reserved for future tournament feature (create now, no UI):
+  CREATE TABLE IF NOT EXISTS tournaments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    format TEXT NOT NULL DEFAULT "single_elim",
+    status TEXT NOT NULL DEFAULT "pending",
+    created_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS tournament_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tournament_id INTEGER NOT NULL REFERENCES tournaments(id),
+    player_id INTEGER NOT NULL REFERENCES players(id),
+    seed INTEGER
+  );
+  CREATE TABLE IF NOT EXISTS tournament_matches (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tournament_id INTEGER NOT NULL REFERENCES tournaments(id),
+    match_id INTEGER REFERENCES matches(id),
+    round INTEGER NOT NULL,
+    bracket_position INTEGER NOT NULL
+  );
+
+=== GAME STATE MACHINE ===
+
+WAITING
+  → any RFID tap on any side → PLAYERS_REGISTERING
+
+PLAYERS_REGISTERING
+  → A slot 1 AND B slot 1 both filled → GAME_PLAYING (auto, no button)
+  → additional players can tap in at any point (join as slot 2)
+  → if a player deregisters and one side becomes empty → stay REGISTERING
+
+GAME_PLAYING
+  → either side reaches live_tables.max_score goals → GAME_OVER
+  → ALL players on one side deregister → ABANDONED
+      (no grace period — immediate stop when a full side empties)
+  → second player can tap in mid-game (joins slot 2 of their side)
+  → second player can deregister mid-game (removed from slot 2)
+  → slot 1 player can deregister mid-game IF there is a slot 2 player
+      (slot 2 becomes slot 1, game continues)
+  → slot 1 player deregisters with NO slot 2 player → ABANDONED
+
+GAME_OVER
+  → save complete match to history (once, deduplicated by session_id)
+  → state stays GAME_OVER until any RFID tap → WAITING
+
+ABANDONED
+  → save partial match with result_type = "abandoned"
+  → state → WAITING immediately
+
+Mode assignment (dynamic, updated whenever live_players changes):
+  both sides have 1 player  → mode = "1v1"
+  both sides have 2 players → mode = "2v2"
+  mixed (1 vs 2)            → mode = "mixed"
+  Mixed is valid — game proceeds normally.
+
+=== RFID BEHAVIOR ===
+
+On any RFID tap received (tablefootball/table/<id>/rfid):
+
+1. Look up UID in players table.
+   If not found: create new guest (Guest1, Guest2, ... GuestN).
+
+2. Log to rfid_events.
+
+3. Check if UID already in live_players for this table:
+
+   YES (player already registered):
+     → Deregister logic:
+       If state is GAME_PLAYING:
+         If this is the last player on their side:
+           → remove from live_players → ABANDONED
+         If their side has another player:
+           → remove this player (slot reassigned)
+           → game continues
+       If state is PLAYERS_REGISTERING or WAITING:
+         → remove from live_players
+         → if one side now empty → no state change needed
+       Log event_type = "deregister"
+
+   NO (new registration):
+     → Find first empty slot on the tapping side (slot 1, then slot 2).
+     → If both slots full: ignore tap, log event_type = "ignored".
+     → Add to live_players.
+     → Check auto-start condition (A slot 1 AND B slot 1 filled).
+     → If met and state != GAME_PLAYING: → GAME_PLAYING.
+     → Log event_type = "register"
+
+4. After any change:
+   → Publish tablefootball/pico/<pico_id>/player (response to Pico)
+   → Publish tablefootball/table/<table_id>/sync (to all Picos)
+   → Push SSE update to all browsers
+
+=== MQTT PROTOCOL ===
+
+Every payload includes:
+  "v": 1
+  "ts": <unix_ms>   (server overwrites with its own timestamp on receipt)
+
+QoS levels:
+  heartbeat          → QoS 0
+  rfid               → QoS 1
+  state              → QoS 1
+  ball_position      → QoS 0   (lossy fine, high frequency)
+  table sync         → QoS 1, retain=true
+  players_list       → QoS 1, retain=true
+
+LWT per Pico:
+  topic:   tablefootball/pico/<pico_id>/status
+  payload: {"pico_id":"<id>", "online":false, "reason":"lwt"}
+  retain:  true, qos: 1
+
+--- Topics ---
+
+Pico → Pi:
+
+tablefootball/pico/<pico_id>/heartbeat
 {
+  "v": 1,
+  "pico_id": "table1-left",
+  "table_id": 1,
+  "side": "A",
+  "role": "primary",
+  "ip": "192.168.4.20",
+  "firmware": "0.1.0",
+  "uptime": 12345
+}
+
+tablefootball/table/<table_id>/rfid
+{
+  "v": 1,
+  "pico_id": "table1-left",
+  "table_id": 1,
+  "side": "A",
+  "slot": 1,
+  "uid": "DBEF7005",
+  "event": "card_tapped",
+  "ts": 12345
+}
+
+tablefootball/table/<table_id>/state  (primary Pico only)
+{
+  "v": 1,
+  "pico_id": "table1-left",
+  "table_id": 1,
+  "session_id": "table1-20260622-143000",
   "state": "GAME_PLAYING",
-  "p1": "Guest",
-  "p1_uid": "DBEF7005",
-  "p2": "Guest",
-  "p2_uid": "4C069804",
+  "mode": "mixed",
   "score_a": 3,
   "score_b": 2,
   "fastest": 12.4,
-  "winner": "",
+  "winner_side": "",
   "winner_uid": "",
   "time": 80
 }
 
-When finished:
-
+tablefootball/table/<table_id>/ball   (primary Pico only, 10Hz)
 {
-  "state": "GAME_OVER",
-  "p1": "Sara",
-  "p1_uid": "DBEF7005",
-  "p2": "Ali",
-  "p2_uid": "4C069804",
-  "score_a": 5,
-  "score_b": 3,
-  "fastest": 12.4,
-  "winner": "Sara",
-  "winner_uid": "DBEF7005",
-  "time": 160
+  "v": 1,
+  "table_id": 1,
+  "x": 320,
+  "y": 180,
+  "speed": 14.2
 }
 
-RFID UID must be sent as uppercase hex string without spaces.
+Pi → Pico:
 
-Part 4: Server endpoint POST /update
-
-Implement POST /update.
-
-Behavior:
-- Receive JSON from Pico.
-- Read p1_uid and p2_uid.
-- For each UID:
-  - If player exists, use existing player.
-  - If player does not exist, create guest player automatically.
-  - Guest names should be Guest1, Guest2, Guest3, etc.
-- Update live_state table with:
-  - state
-  - player1_id
-  - player2_id
-  - score1
-  - score2
-  - fastest_shot
-  - winner_id
-  - updated_at
-- If winner_uid exists, map it to winner_id.
-- If state is GAME_OVER, save one match in matches table.
-- Avoid saving the same finished match repeatedly, because the Pico may continue sending GAME_OVER every second.
-- Use a simple duplicate protection:
-  - Save a GAME_OVER match only if the last saved match does not have the same player1_id, player2_id, score1, score2, and ended_at within the last few seconds.
-  - Or track previous live_state transition from non-GAME_OVER to GAME_OVER.
-
-Part 5: API endpoint GET /api/live
-
-Return current live match state using database player names.
-
-Example response:
-
+tablefootball/pico/<pico_id>/player
 {
+  "uid": "DBEF7005",
+  "player_id": 3,
+  "name": "Alice",
+  "is_guest": false,
+  "side": "A",
+  "slot": 1
+}
+
+tablefootball/table/<table_id>/sync   (retain=true)
+{
+  "table_id": 1,
   "state": "GAME_PLAYING",
-  "player1": {
-    "id": 1,
-    "name": "Sara",
-    "rfid_uid": "DBEF7005",
-    "is_guest": false
-  },
-  "player2": {
-    "id": 2,
-    "name": "Ali",
-    "rfid_uid": "4C069804",
-    "is_guest": false
-  },
-  "score1": 3,
-  "score2": 2,
-  "fastest_shot": 12.4,
-  "winner": null,
-  "updated_at": "2026-06-21 12:45:30"
-}
-
-If no live match exists, return default values:
-- state: "WAITING"
-- score1: 0
-- score2: 0
-- fastest_shot: 0
-- winner: null
-
-Part 6: API endpoint GET /api/players
-
-Return all players with calculated statistics.
-
-Each player object:
-
-{
-  "id": 1,
-  "name": "Sara",
-  "rfid_uid": "DBEF7005",
-  "is_guest": false,
-  "games": 5,
-  "wins": 3,
-  "losses": 2,
-  "best_shot": 12.4,
-  "status": "Active"
-}
-
-Statistics:
-- games = number of matches where player is player1 or player2
-- wins = number of matches where winner_id = player id
-- losses = games - wins
-- best_shot = maximum fastest_shot from matches where player participated
-- status = "Active" if player is currently player1 or player2 in live_state and state is GAME_PLAYING, otherwise "Offline"
-
-Part 7: API endpoint GET /api/player/<player_id>
-
-Return one player profile with previous matches.
-
-Response:
-
-{
-  "id": 1,
-  "name": "Sara",
-  "rfid_uid": "DBEF7005",
-  "is_guest": false,
-  "games": 5,
-  "wins": 3,
-  "losses": 2,
-  "best_shot": 12.4,
-  "matches": [
-    {
-      "date": "21 Jun 2026 14:30",
-      "opponent": "Ali",
-      "score": "5 - 3",
-      "result": "Win",
-      "fastest_shot": 12.4
-    },
-    {
-      "date": "20 Jun 2026 16:10",
-      "opponent": "Max",
-      "score": "2 - 5",
-      "result": "Loss",
-      "fastest_shot": 11.1
-    }
+  "mode": "mixed",
+  "score_a": 3,
+  "score_b": 2,
+  "max_score": 10,
+  "team_a": [
+    {"slot":1, "player_id":1, "name":"Alice", "uid":"DBEF7005", "is_guest":false}
+  ],
+  "team_b": [
+    {"slot":1, "player_id":2, "name":"Bob", "uid":"4C069804", "is_guest":false},
+    {"slot":2, "player_id":5, "name":"Guest5", "uid":"11223344", "is_guest":true}
   ]
 }
 
-The matches array should only include matches where this player participated.
-Sort newest first.
-Limit to the latest 10 or 20 matches.
-
-Part 8: API endpoint POST /api/register-player
-
-Input:
-
+tablefootball/pico/<pico_id>/players_list   (retain=true)
 {
-  "player_id": 3,
-  "name": "Sara"
+  "players": [
+    {"uid": "DBEF7005", "name": "Alice"},
+    {"uid": "4C069804", "name": "Bob"}
+  ]
 }
 
-Behavior:
-- Find the player by id.
-- Update the same row:
-  - name = provided name
-  - is_guest = 0
-- Do not create a new player.
-- Keep all previous matches and statistics.
-- Return updated player data.
+tablefootball/pico/<pico_id>/cmd
+{
+  "cmd": "identify"           -- flash display
+}
+{
+  "cmd": "reset_match"
+}
+{
+  "cmd": "clear_players"
+}
+{
+  "cmd": "sync_players"       -- triggers server to re-send players_list
+}
+{
+  "cmd": "show_message",
+  "message": "Go to admin desk"
+}
 
-Validate:
-- name must not be empty
-- name should be trimmed
-- if another registered player already uses the same name, return an error
+=== SSE EVENTS ===
 
-Part 9: Frontend page GET /
+Endpoint: GET /events  (text/event-stream)
 
-Build a single HTML page.
+Event types:
 
-Layout:
-- Dark modern dashboard
-- Header:
-  - Table Football Live Dashboard
-  - System Online
-  - Current time or last update
+  event: table_state
+  data: {"table_id":1, "state":"GAME_PLAYING", "score_a":3, "score_b":2,
+         "mode":"mixed", "max_score":10, "fastest":12.4,
+         "team_a":[...], "team_b":[...]}
 
-Section 1: Live Match card
-Show:
-- Player 1 name
-- Player 2 name
-- Score
-- Status
-- Fastest Shot
-- Winner
+  event: ball_position
+  data: {"table_id":1, "x":320, "y":180, "speed":14.2}
+  (NOT stored in DB — broadcast only)
 
-Do not show:
-- possession
-- total shots
-- last goal
-- ball position
+  event: player_update
+  data: {"players": [...]}
 
-Section 2: All Players list
-Use a table-like layout.
+  event: pico_status
+  data: {"pico_id":"table1-left", "online":true}
 
-Columns:
-- Player
-- RFID UID
-- Games
-- Wins
-- Best Shot
-- Status
+Ball position SSE behavior:
+  - Only broadcast when table state is GAME_PLAYING.
+  - If SSE client queue is full (max 20 items), drop ball_position events.
+  - Never drop table_state, player_update, or pico_status events.
 
-Each row should be clickable.
-Clicking a player row opens the player profile dialog.
+=== HTTP ROUTES ===
 
-Guest players should have a small "Guest" badge.
-Registered players should have a small "Registered" badge.
+Public:
 
-Part 10: Player profile dialog
+GET /
+  Public dashboard. Shows all tables with live state, field visualization,
+  players, score, fastest shot. Auto-connects to SSE.
 
-When clicking a player row:
-- JavaScript calls GET /api/player/<player_id>
-- Show modal dialog with:
-  - Name
-  - Registered/Guest badge
+GET /player/<uid>
+  Standalone player profile page (linkable URL, works as direct link).
+  Shows name, stats, match history.
+
+GET /events
+  SSE stream endpoint.
+
+API:
+
+GET /api/tables
+GET /api/table/<table_id>/live
+GET /api/players
+GET /api/player/<player_id>
+GET /api/player/by-uid/<uid>    -- lookup by RFID UID for future NFC feature
+GET /api/matches                -- optional: ?table_id=&player_id=&limit=
+
+POST /api/register-player
+  {"player_id": 3, "name": "Alice"}
+  Validates: name not empty, not taken by another registered player.
+  Updates same DB row. Sets is_guest=0.
+
+Admin:
+
+GET  /admin/login
+POST /api/admin/login
+POST /api/admin/logout
+
+GET  /admin                     -- protected panel
+
+GET  /api/admin/picos
+POST /api/admin/pico/<pico_id>/command
+     {"cmd": "identify"}
+     {"cmd": "show_message", "message": "..."}
+
+POST /api/admin/table
+     {"name": "Table 2", "location": "Room A"}
+
+POST /api/admin/table/<table_id>/rename
+     {"name": "Main Table"}
+
+POST /api/admin/table/<table_id>/max_score
+     {"max_score": 7}
+     Updates tables.max_score and live_tables.max_score for this table.
+
+POST /api/admin/table/<table_id>/reset
+     Forces state → WAITING, clears live_players, publishes sync.
+
+POST /api/admin/table/<table_id>/start
+     Admin manually starts game (state → GAME_PLAYING) if both sides
+     have at least slot 1 filled.
+
+POST /api/admin/table/<table_id>/stop
+     Admin manually stops game (state → ABANDONED).
+     Saves partial match with result_type="abandoned".
+
+POST /api/admin/table/<table_id>/add_player
+     {"side": "A", "slot": 1, "player_id": 3}
+     Admin adds a player to a slot manually.
+     Triggers same auto-start check as RFID tap.
+
+POST /api/admin/table/<table_id>/remove_player
+     {"side": "A", "slot": 1}
+     Admin removes a player from a slot.
+     Triggers same abandon check as RFID deregister.
+
+POST /api/admin/pico/<pico_id>/assign
+     {"table_id": 1, "side": "A", "role": "primary"}
+
+POST /api/admin/player/<player_id>/rename
+     {"name": "Alice"}
+
+=== ADMIN AUTH ===
+
+  - Session-based via flask.session.
+  - SECRET_KEY from .env.
+  - Password from .env (ADMIN_PASSWORD).
+  - NO session expiry (prototype on closed local network).
+  - Rate limit login: 5 attempts per minute per IP (in-memory dict).
+  - All /admin and /api/admin/* routes check session["admin"] == True.
+
+=== PUBLIC DASHBOARD SPEC ===
+
+Table card shows:
+  - Table name + state badge (color-coded)
+  - Mode: 1v1 / 2v2 / mixed
+  - Team A players list with guest badges
+  - Team B players list with guest badges
+  - Score: large, centered (e.g. "3 : 5")
+  - Fastest shot (km/h)
+  - Field visualization with moving ball dot (GAME_PLAYING only)
+  - Winner banner (GAME_OVER only)
+  - "Abandoned" notice (ABANDONED)
+  - Last update time
+
+Field visualization:
+  - Green CSS rectangle, aspect ratio ~2:1
+  - White centre line and centre circle
+  - Ball: white dot, absolute positioned by x/y from SSE ball_position
+  - Coordinates: x 0–1000, y 0–500, map to field CSS dimensions
+  - Only rendered during GAME_PLAYING
+
+All Players list columns:
+  Player | RFID UID | Games | Wins | Losses | Best Shot | Status
+
+Status values:
+  Active  — currently in a GAME_PLAYING table
+  Waiting — scanned but no game started
+  Offline — not currently at any table
+
+Player profile modal (click on player in list):
+  - Name + registered/guest badge
   - RFID UID
-  - Games
-  - Wins
-  - Losses
-  - Best Shot
-  - Match History table
+  - Stats: games, wins, losses, best shot
+  - Match history (latest 20 matches)
+  - "Register This Player" button if is_guest=true
 
-Match History table columns:
-- Date
-- Match
-- Score
-- Result
-- Fastest Shot
+Match history row format:
+  Date | Table | Match | Score | Result | Fastest Shot
+  Example: 21 Jun 2026 14:30 | Table 1 | Alice + Max vs Bob + Guest5 | 5-4 | Win | 15.2 km/h
+  Supports 1v1, 2v2, and mixed match display.
 
-Example:
-21 Jun 2026 14:30 | Sara vs Ali | 5 - 3 | Win | 12.4 km/h
+=== ADMIN PANEL SPEC ===
 
-If the player is a guest:
-- Show button: "Register This Player"
-- Clicking it opens the register dialog for this player.
+Section 1 — Pico Devices:
+  Table: pico_id, table, side, role, IP, firmware, status, last seen
+  Actions per row:
+    Identify | Sync Players | Reset Match | Clear Players | Show Message
 
-Part 11: Register dialog
+Section 2 — Tables:
+  For each table:
+    Name, state, score, max_score, assigned Picos, current players
+  Actions:
+    Create Table | Rename | Set Max Score
+    Start Game | Stop Game | Reset
+    Add Player to Slot | Remove Player from Slot
 
-Register dialog fields:
-- RFID UID, read-only
-- Current name, read-only
-- New player name, input
-- Cancel button
-- Save button
+Section 3 — Guest Registration:
+  List of all guests.
+  Select guest → enter real name → Save.
+  Updates same DB row, keeps all history.
 
-On Save:
-- Call POST /api/register-player
-- Close register dialog
-- Refresh:
-  - players list
-  - live match
-  - profile dialog if it is still open
+Section 4 — Player Management:
+  All players, rename, register guest, view history.
 
-Important:
-If Guest1 is registered as Sara, do not create a new player.
-Update the existing Guest1 row.
-All history must remain connected.
+=== PICO STANDALONE / OFFLINE MODE ===
 
-Part 12: JavaScript behavior
+Server concern only:
+  - On Pico heartbeat receipt: server re-sends players_list.
+  - players_list: all registered players as {uid, name} list.
+  - Pico firmware stores this list in flash (not server's concern).
+  - Offline matches are NOT synced back (v1 limitation, document it).
 
-In static/script.js:
-- Poll GET /api/live every 1 second.
-- Poll GET /api/players every 3 seconds.
-- Implement:
-  - loadLive()
-  - loadPlayers()
-  - openPlayerProfile(playerId)
-  - openRegisterDialog(player)
-  - submitRegistration()
-  - closeModal()
+=== STARTUP BEHAVIOR ===
 
-Use fetch().
-No frontend framework.
-Plain JavaScript only.
+On Flask app startup:
+  1. Create/migrate DB schema idempotently.
+  2. Enable WAL and foreign keys.
+  3. Reset all live_tables.state to "WAITING".
+  4. Mark all pico_devices.online = 0.
+  5. Start MQTT client (retry with backoff: 1s, 2s, 4s, 30s max).
+  6. Subscribe to: tablefootball/#
+  7. Start heartbeat watchdog thread (every 5s, PICO_OFFLINE_SEC timeout).
+  8. Load live_tables into state.py from DB.
+  9. Start SSE broadcast system.
 
-Part 13: CSS style
+=== ERROR HANDLING ===
 
-In static/style.css:
-- Dark background
-- Card layout
-- Rounded corners
-- Green accent for active status
-- Purple accent for fastest shot
-- Red/blue player colors
-- Modal dialog centered or side panel
-- Table rows hover effect
-- Guest badge yellow
-- Registered badge green
+  - MQTT disconnect: auto-reconnect with backoff, log WARNING each retry.
+  - DB write failure: log ERROR, return 500 HTTP, drop MQTT message.
+  - Duplicate GAME_OVER: session_id UNIQUE silently rejects.
+  - Same RFID tap from both Picos within 500ms:
+      Deduplicate by (uid, table_id, ts) — accept first, drop second.
+  - Player rename collision: return 400 with descriptive error message.
+  - Admin wrong password: increment attempt counter per IP.
+  - Pico offline: LWT received → mark offline → push SSE pico_status.
 
-Part 14: README
+=== LOGGING ===
 
-Create server/README.md with:
+  File: logs/server.log (rotating, max 10MB, 5 backups)
+  Format: "%(asctime)s %(levelname)s %(module)s: %(message)s"
+  INFO:    startup, MQTT connect, GAME_OVER, ABANDONED, registrations
+  DEBUG:   every MQTT message (disabled by default)
+  WARNING: Pico offline, retries, validation failures, login failures
+  ERROR:   DB failures, broker unreachable, exceptions
 
-Setup:
-cd server
-python3 -m venv venv
-source venv/bin/activate
-pip install flask
-python app.py
+=== DEPLOYMENT ===
 
-Open:
-http://<raspberry-pi-ip>:5000
+1. scripts/setup_hotspot.sh
+   Uses nmcli on Pi OS Bookworm:
+     nmcli con add type wifi ifname wlan0 con-name "TableFootball-AP" \
+       autoconnect yes ssid "TableFootball"
+     nmcli con modify "TableFootball-AP" \
+       802-11-wireless.mode ap \
+       802-11-wireless-security.key-mgmt wpa-psk \
+       802-11-wireless-security.psk "YourPassword" \
+       ipv4.method shared \
+       ipv4.address 192.168.4.1/24
+     nmcli con up "TableFootball-AP"
 
-Pico should send to:
-http://<raspberry-pi-ip>:5000/update
+2. systemd/football.service
+   [Unit]
+   Description=Table Football Flask Server
+   After=network.target mosquitto.service
+   Requires=mosquitto.service
 
-Part 15: Keep implementation simple
+   [Service]
+   User=pi
+   WorkingDirectory=/home/pi/server
+   ExecStart=/home/pi/server/venv/bin/python app.py
+   Restart=on-failure
+   RestartSec=5
+   EnvironmentFile=/home/pi/server/.env
 
-This is a university prototype.
-Avoid complex frameworks.
-Use Flask, SQLite, HTML, CSS, and plain JavaScript.
-Code should be readable and easy to explain.
+   [Install]
+   WantedBy=multi-user.target
+
+3. scripts/backup_db.sh
+   #!/bin/bash
+   DATE=$(date +%Y%m%d_%H%M%S)
+   cp /home/pi/server/football.db \
+      /home/pi/server/backups/football_$DATE.db
+   find /home/pi/server/backups -name "*.db" -mtime +7 -delete
+
+   Crontab: 0 4 * * * /home/pi/server/scripts/backup_db.sh
+
+4. /etc/mosquitto/conf.d/football.conf
+   allow_anonymous true
+   max_connections 20
+   listener 1883 0.0.0.0
+
+=== FUTURE FEATURES (accommodated now, not implemented) ===
+
+1. Web NFC player profile:
+   GET /player/<uid> already exists.
+   GET /api/player/by-uid/<uid> already exists.
+   Implementation: browser calls navigator.nfc.scan() → navigates to
+   /player/<uid>. Zero server changes needed.
+
+2. Tournament:
+   Tables already created in DB (tournaments, tournament_entries,
+   tournament_matches). No UI in v1. Add later with no migration.
+
+=== README ===
+
+  1. Architecture diagram (ASCII)
+  2. Hardware list
+  3. Setup:
+     a. Flash Pi OS Bookworm Lite
+     b. sudo bash scripts/setup_hotspot.sh
+     c. sudo apt install -y mosquitto mosquitto-clients
+     d. sudo systemctl enable mosquitto && sudo systemctl start mosquitto
+     e. python3 -m venv venv && source venv/bin/activate
+     f. pip install flask paho-mqtt python-dotenv
+     g. cp .env.example .env  → set ADMIN_PASSWORD and SECRET_KEY
+     h. sudo cp systemd/football.service /etc/systemd/system/
+     i. sudo systemctl enable football && sudo systemctl start football
+     j. Reboot — everything starts automatically.
+  4. Change admin password: edit .env, restart service.
+  5. Backup DB: run backup_db.sh or wait for cron.
+  6. MQTT test commands with mosquitto_pub.
+  7. Simulate game without Picos: python tests/simulate_game.py
+  8. Troubleshooting:
+     - Picos can't connect: check hotspot SSID
+     - Dashboard not updating: check /events in browser DevTools
+     - MQTT not delivering: journalctl -u mosquitto
+     - DB locked: check WAL mode
+     - Server won't start: check .env has SECRET_KEY set
+  9. Known limitations:
+     - Offline matches not synced back to Pi
+     - No HTTPS (acceptable on closed local network)
+     - Admin session never expires (change for production)
+
+Keep all code simple, readable, and commented.
+University prototype on a closed local network.
+Favor clarity over performance.

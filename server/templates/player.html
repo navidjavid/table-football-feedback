@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Player Profile — Table Football</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><a href="/" class="link-muted">Table Football</a></div>
+    <div class="topbar-actions">
+      <span class="link-muted">Player profile</span>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="card" id="profile-card" data-uid="{{ uid }}">
+      <div class="loading">Loading...</div>
+    </section>
+  </main>
+
+  <script>
+    window.PLAYER_UID = {{ uid | tojson }};
+  </script>
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
