@@ -1,3 +1,17 @@
+# == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
+if(WIN32)
+    set(USERHOME $ENV{USERPROFILE})
+else()
+    set(USERHOME $ENV{HOME})
+endif()
+set(sdkVersion 2.2.0)
+set(toolchainVersion 14_2_Rel1)
+set(picotoolVersion 2.2.0-a4)
+set(picoVscode ${USERHOME}/.pico-sdk/cmake/pico-vscode.cmake)
+if (EXISTS ${picoVscode})
+    include(${picoVscode})
+endif()
+# ====================================================================================
 cmake_minimum_required(VERSION 3.13)
 
 set(CMAKE_C_STANDARD 11)
@@ -48,6 +62,7 @@ add_executable(table-football
     src/i2c_comms.c
     src/game_logic.c
     src/display_manager.c
+    src/pico_mqtt.c
 )
 target_include_directories(table-football PRIVATE ${COMMON_INCLUDES})
 pico_set_program_name(table-football "table-football")
@@ -61,6 +76,7 @@ target_link_libraries(table-football
     pn532_lib
     ea_dogl128_lib
     pico_cyw43_arch_lwip_poll   # WiFi + lwIP in polling mode
+    pico_lwip_mqtt              # MQTT client to the Pi broker
 )
 pico_add_extra_outputs(table-football)
 

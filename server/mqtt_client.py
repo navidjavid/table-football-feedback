@@ -129,6 +129,16 @@ def _handle_rfid(table_id: int, payload: dict) -> None:
         log.warning("RFID for unknown table %s", table_id)
         return
 
+    if lt["state"] in ("GAME_OVER", "ABANDONED"):
+        # Previous match's roster is still sitting in live_players (kept
+        # around so the GAME_OVER banner/team list can show who just
+        # played). The first tap of a new game must start from a clean
+        # slate, otherwise this tap gets misread as a deregister of a
+        # stale entry, or the side appears "full" and the tap is ignored.
+        db.clear_live_players(table_id)
+        db.update_live_table(table_id, state="WAITING", mode=None)
+        lt = db.get_live_table(table_id)
+
     player = db.get_or_create_player_by_uid(uid)
 
     existing = db.find_live_player_by_uid(table_id, uid)

@@ -28,10 +28,13 @@
 
   const state = {
     tables: new Map(),    // table_id -> snapshot
+    balls:  new Map(),    // table_id -> {x, y} last known ball coords
+    goalFlash: new Map(), // table_id -> {ts, side, name} - active goal banner
     players: [],
     es: null,
     pollTimer: null,
   };
+  const GOAL_FLASH_MS = 2000;
 
   // ---- Initial load ----
   fetchTables();
@@ -76,7 +79,18 @@
       es.addEventListener("table_state", (ev) => {
         try {
           const snap = JSON.parse(ev.data);
+          const prev = state.tables.get(snap.table_id);
+          if (prev && prev.state === "GAME_PLAYING") {
+            if (snap.score_a > prev.score_a) triggerGoal(snap.table_id, "A", snap.team_a);
+            if (snap.score_b > prev.score_b) triggerGoal(snap.table_id, "B", snap.team_b);
+          }
           state.tables.set(snap.table_id, snap);
+          if (snap.state !== "GAME_PLAYING") {
+            state.balls.delete(snap.table_id);
+          }
+          if (snap.state === "WAITING" || snap.state === "PLAYERS_REGISTERING") {
+            state.goalFlash.delete(snap.table_id);
+          }
           renderTables();
           touchUpdate();
         } catch (e) { console.warn("bad table_state event", e); }
@@ -85,6 +99,7 @@
       es.addEventListener("ball_position", (ev) => {
         try {
           const b = JSON.parse(ev.data);
+          state.balls.set(b.table_id, {x: b.x, y: b.y});
           moveBall(b.table_id, b.x, b.y);
         } catch {}
       });
@@ -149,9 +164,29 @@
     tablesEl.innerHTML = ids.map((id) => tableCard(state.tables.get(id))).join("");
   }
 
+  function triggerGoal(tableId, side, team) {
+    const name = (team && team.length)
+      ? team.map((p) => p.name || "?").join(" + ")
+      : ("Side " + side);
+    state.goalFlash.set(tableId, { ts: Date.now(), side, name });
+    // Force a re-render once the flash expires even if no further
+    // table_state event arrives (e.g. the winning goal of the match).
+    setTimeout(() => {
+      const f = state.goalFlash.get(tableId);
+      if (f && Date.now() - f.ts >= GOAL_FLASH_MS - 50) {
+        state.goalFlash.delete(tableId);
+      }
+      renderTables();
+    }, GOAL_FLASH_MS + 50);
+  }
+
   function tableCard(s) {
     const stateBadge = stateBadgeFor(s.state);
-    const showField = s.state === "GAME_PLAYING";
+    const flash = state.goalFlash.get(s.table_id);
+    const flashActive = !!flash && (Date.now() - flash.ts) < GOAL_FLASH_MS;
+    // Keep the field visible for the flash duration even after GAME_OVER,
+    // so the final goal's banner still has somewhere to render.
+    const showField = s.state === "GAME_PLAYING" || (s.state === "GAME_OVER" && flashActive);
     const fastest = s.fastest ? s.fastest.toFixed(1) : "0.0";
     const mode = s.mode ? `Mode: ${s.mode}` : "&nbsp;";
 
@@ -171,23 +206,19 @@
         <span class="badge ${stateBadge.cls}">${stateBadge.label}</span>
       </header>
 
-      <div class="team-list team-a-list">${renderTeam(s.team_a, "A")}</div>
-
       <div class="score-row">
         <div class="side">
-          <h4>Side A</h4>
+          <h4 class="side-name side-name-a">${sideNames(s.team_a, "Side A")}</h4>
           <div class="score score-a">${s.score_a}</div>
         </div>
         <div class="divider">:</div>
         <div class="side">
-          <h4>Side B</h4>
+          <h4 class="side-name side-name-b">${sideNames(s.team_b, "Side B")}</h4>
           <div class="score score-b">${s.score_b}</div>
         </div>
       </div>
 
-      <div class="team-list team-b-list">${renderTeam(s.team_b, "B")}</div>
-
-      ${showField ? `<div class="field" id="field-${s.table_id}"><div class="ball" id="ball-${s.table_id}" style="left:50%; top:50%"></div></div>` : ""}
+      ${showField ? fieldHTML(s.table_id, flashActive ? flash : null) : ""}
 
       ${banner}
 
@@ -199,16 +230,39 @@
     </article>`;
   }
 
-  function renderTeam(players, side) {
-    if (!players.length) {
-      return `<span class="player-chip team-${side.toLowerCase()} empty">no players</span>`;
+  function fieldHTML(tableId, flash) {
+    // Reuse the last known ball coords so re-rendering the card (which
+    // happens on every score/state update) doesn't snap the ball back
+    // to the centre for ~100ms until the next ball_position arrives.
+    const last = state.balls.get(tableId);
+    const left = last ? Math.max(0, Math.min(100, (last.x / 1000) * 100)) : 50;
+    const top  = last ? Math.max(0, Math.min(100, (last.y / 500)  * 100)) : 50;
+
+    let flashHTML = "";
+    if (flash) {
+      // animation-delay carries a negative offset equal to elapsed time,
+      // so if this card gets torn down and recreated mid-flash (every
+      // table_state re-render does that), the CSS animation keeps
+      // playing from where it left off instead of restarting.
+      const elapsedS = (Date.now() - flash.ts) / 1000;
+      flashHTML = `<div class="goal-flash goal-flash-${flash.side.toLowerCase()}"
+                        style="animation-delay:-${elapsedS}s">
+        <span class="goal-flash-text">GOAL!</span>
+        <span class="goal-flash-name">${escapeHTML(flash.name)}</span>
+      </div>`;
     }
-    return players.map((p) => {
-      const guest = p.is_guest ? `<span class="badge guest">Guest</span>` : "";
-      return `<span class="player-chip team-${side.toLowerCase()}">
-        <span class="name">${escapeHTML(p.name || "?")}</span>${guest}
-      </span>`;
-    }).join("");
+
+    return `<div class="field" id="field-${tableId}">
+      <div class="goal goal-a"></div>
+      <div class="goal goal-b"></div>
+      ${flashHTML}
+      <div class="ball" id="ball-${tableId}" style="left:${left}%; top:${top}%"></div>
+    </div>`;
+  }
+
+  function sideNames(players, fallback) {
+    if (!players || !players.length) return fallback;
+    return players.map((p) => escapeHTML(p.name || "?")).join(" + ");
   }
 
   function stateBadgeFor(s) {

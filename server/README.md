@@ -58,10 +58,14 @@ sudo bash scripts/setup_hotspot.sh "TableFootball" "football2026"
 sudo apt update
 sudo apt install -y mosquitto mosquitto-clients sqlite3
 sudo tee /etc/mosquitto/conf.d/football.conf >/dev/null <<'EOF'
+listener 1883
 allow_anonymous true
 max_connections 20
-listener 1883 0.0.0.0
 EOF
+# NOTE: `listener` must come FIRST. mosquitto applies any settings declared
+# before a `listener` line to its implicit default listener; if `listener`
+# comes last, you end up with two listeners both bound to 1883 and the
+# broker fails with "Address already in use" against itself.
 sudo systemctl enable mosquitto
 sudo systemctl restart mosquitto
 
@@ -163,6 +167,7 @@ mosquitto_pub -h localhost -t tablefootball/table/1/rfid \
 
 | Symptom | First thing to check |
 |---------|----------------------|
+| mosquitto fails with "Address already in use" against itself | Check `/etc/mosquitto/conf.d/football.conf` — `listener 1883` must be the **first** line, before `allow_anonymous`/`max_connections`. See note in step 3 above. |
 | Picos can't see the hotspot | `nmcli con show TableFootball-AP` then `nmcli con up TableFootball-AP` |
 | Dashboard not updating | DevTools → Network → `/events` shows a `text/event-stream` that stays open |
 | MQTT messages not arriving | `mosquitto_sub -h localhost -t 'tablefootball/#' -v` while triggering a tap |

@@ -120,11 +120,22 @@ h2 { font-size: 17px; color: var(--text-dim); text-transform: uppercase; letter-
   gap: 8px; padding: 6px 0;
 }
 .score-row .side { text-align: center; min-width: 0; }
-.score-row .side h4 { margin: 0 0 6px; font-size: 13px; color: var(--text-dim); }
-.score-row .score { font-size: 44px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
+.score-row .side h4 {
+  margin: 0 0 6px; font-size: 15px; font-weight: 600; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.side-name {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.04);
+}
+.side-name-a { border-left: 3px solid var(--team-a); }
+.side-name-b { border-left: 3px solid var(--team-b); }
+.score-row .score { font-size: 52px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; }
 .score-row .score-a { color: var(--team-a); }
 .score-row .score-b { color: var(--team-b); }
-.score-row .divider { font-size: 28px; color: var(--text-dim); }
+.score-row .divider { font-size: 32px; color: var(--text-dim); }
 
 .player-chip {
   display: inline-flex; gap: 6px; align-items: center;
@@ -170,7 +181,8 @@ h2 { font-size: 17px; color: var(--text-dim); text-transform: uppercase; letter-
 
 .field {
   position: relative;
-  aspect-ratio: 2 / 1;
+  /* Real table: 140cm long x 76cm wide. */
+  aspect-ratio: 140 / 76;
   background:
     radial-gradient(circle at center, rgba(255,255,255,0.06) 0 60px, transparent 60px),
     linear-gradient(90deg, #1d4d2a 0%, #225833 50%, #1d4d2a 100%);
@@ -206,6 +218,60 @@ h2 { font-size: 17px; color: var(--text-dim); text-transform: uppercase; letter-
   transform: translate(-50%, -50%);
   transition: left 80ms linear, top 80ms linear;
   pointer-events: none;
+}
+.goal {
+  position: absolute;
+  top: 50%;
+  width: 6px;
+  height: 36%;
+  background: repeating-linear-gradient(
+    45deg, rgba(255,255,255,0.55) 0 4px, rgba(255,255,255,0.15) 4px 8px
+  );
+  transform: translateY(-50%);
+}
+.goal-a { left: 0; border-radius: 0 3px 3px 0; }
+.goal-b { right: 0; border-radius: 3px 0 0 3px; }
+
+.goal-flash {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: rgba(8,12,10,0.55);
+  pointer-events: none;
+  animation: goal-flash-pop 2s ease-out forwards;
+}
+.goal-flash-text {
+  font-size: 30px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #fff;
+  text-shadow: 0 0 16px rgba(255,255,255,0.85), 0 2px 4px rgba(0,0,0,0.5);
+}
+.goal-flash-name {
+  font-size: 14px;
+  font-weight: 600;
+  padding: 3px 12px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.12);
+  color: #fff;
+}
+.goal-flash-a .goal-flash-text { color: var(--team-a); }
+.goal-flash-a .goal-flash-name { border-left: 3px solid var(--team-a); }
+.goal-flash-b .goal-flash-text { color: var(--team-b); }
+.goal-flash-b .goal-flash-name { border-left: 3px solid var(--team-b); }
+
+@keyframes goal-flash-pop {
+  0%   { opacity: 0;   transform: scale(0.55) rotate(-4deg); }
+  12%  { opacity: 1;   transform: scale(1.12) rotate(2deg); }
+  22%  { opacity: 1;   transform: scale(1)    rotate(0deg); }
+  80%  { opacity: 1;   transform: scale(1); }
+  100% { opacity: 0;   transform: scale(0.92); }
 }
 
 /* ---------- Player tables ---------- */

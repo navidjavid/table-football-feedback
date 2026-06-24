@@ -6,6 +6,8 @@
  */
 
 #include "pn532.h"
+#include "hardware/irq.h"
+#include "hardware/regs/intctrl.h"
 #include <string.h>
 #include <stdio.h>
 
@@ -90,10 +92,23 @@ static bool _is_ready(void) {
 }
 
 static bool _wait_ready(int timeout_ms) {
+    // rfid_handler.c disables I2C0_IRQ for the whole pn532_read_card()
+    // call to keep it off the bus during SPI transfers. This loop is the
+    // one place that call can sit for up to ~150ms (polling the PN532's
+    // status register), and with the I2C IRQ off that whole time, every
+    // byte the ball-position Pico sends during a scan gets dropped.
+    // Only mask the IRQ for the few microseconds of the actual SPI
+    // status read; leave it unmasked during each 1ms sleep so the I2C
+    // slave handler can still drain incoming bytes.
     for (int i = 0; i < timeout_ms; i++) {
-        if (_is_ready()) return true;
+        // IRQ must be off only across the SPI status read itself.
+        irq_set_enabled(I2C0_IRQ, false);
+        bool ready = _is_ready();
+        irq_set_enabled(I2C0_IRQ, true);
+        if (ready) { irq_set_enabled(I2C0_IRQ, false); return true; }
         sleep_ms(1);
     }
+    irq_set_enabled(I2C0_IRQ, false);
     return false;
 }
 

@@ -4,6 +4,7 @@
 #include "pico/stdlib.h"
 #include "pico/i2c_slave.h"
 #include <string.h>
+#include <stdio.h>
 
 #define I2C_SDA_PIN  4
 #define I2C_SCL_PIN  5
@@ -39,6 +40,15 @@ void i2c_comms_init(void) {
 void i2c_comms_poll(BallData *out) {
     out->valid = false;
     int avail = (_head - _tail + RING_SIZE) % RING_SIZE;
+
+    // DEBUG: confirms bytes are actually reaching the ring buffer —
+    // remove once the PN532-wait/I2C-IRQ fix is confirmed in the field.
+    static uint32_t last_print = 0;
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+    if (now - last_print > 5000) {
+        printf("[I2C DBG] avail=%d head=%d tail=%d\n", avail, _head, _tail);
+        last_print = now;
+    }
 
     while (avail >= I2C_PACKET_SIZE) {
         uint8_t b0 = _ring[_tail % RING_SIZE];
