@@ -23,37 +23,41 @@ void display_manager_show_splash(void) {
     dogl128_flush();
 }
 
-// ---------------------------------------------------------------------------
-static void render_register_p1(const GameData *g) {
-    (void)g;
+void display_manager_show_status(const char *line) {
     dogl128_clear();
-    dogl128_fill_rect(0, 0, 128, 11);
-    dogl128_invert_rect(0, 0, 128, 11);
-    dogl128_draw_string(14, 2, "REGISTER PLAYERS");
-    dogl128_invert_rect(0, 0, 128, 11);
-    dogl128_draw_string(4, 18, "Player 1:  --------");
-    dogl128_draw_string(4, 30, "Player 2:  --------");
-    dogl128_rect(0, 44, 128, 20);
-    static int b = 0; b++;
-    if (b % 2 == 0)
-        dogl128_draw_string(8, 50, "> Tap card for P1 <");
+    dogl128_rect(0, 0, 128, 64);
+    dogl128_rect(2, 2, 124, 60);
+    dogl128_draw_string_2x(10, 12, "FOOSBALL");
+    dogl128_draw_string(22, 32, "Feedback System");
+    dogl128_hline(20, 48, 88);
+    dogl128_draw_string(4, 53, line);
     dogl128_flush();
 }
 
-static void render_register_p2(const GameData *g) {
+// ---------------------------------------------------------------------------
+// Shown before the game starts (WAITING) AND still shown as an overlay
+// hint during PLAYING when a side only has one player — either state can
+// accept a second tap on the still-open side(s) at any time.
+static void render_waiting(const GameData *g) {
     dogl128_clear();
     dogl128_fill_rect(0, 0, 128, 11);
     dogl128_invert_rect(0, 0, 128, 11);
     dogl128_draw_string(14, 2, "REGISTER PLAYERS");
     dogl128_invert_rect(0, 0, 128, 11);
-    char line[24];
-    snprintf(line, sizeof(line), "P1: %-10s  OK", g->p1_name);
+
+    char label[34], line[40];
+    game_side_label(g, 'A', label, sizeof(label));
+    snprintf(line, sizeof(line), "Side A: %s", label);
     dogl128_draw_string(4, 18, line);
-    dogl128_draw_string(4, 30, "P2: --------");
+
+    game_side_label(g, 'B', label, sizeof(label));
+    snprintf(line, sizeof(line), "Side B: %s", label);
+    dogl128_draw_string(4, 30, line);
+
     dogl128_rect(0, 44, 128, 20);
     static int b = 0; b++;
     if (b % 2 == 0)
-        dogl128_draw_string(8, 50, "> Tap card for P2 <");
+        dogl128_draw_string(2, 50, "> Tap card to join <");
     dogl128_flush();
 }
 
@@ -95,9 +99,10 @@ static void render_goal(const GameData *g) {
     dogl128_draw_string_2x(14, 6, "GOAL!");
 
     // Scorer
-    const char *name = (g->goal_scorer == 1) ? g->p1_name : g->p2_name;
-    char line[24];
-    snprintf(line, sizeof(line), "%s scores!", name);
+    char label[34];
+    game_side_label(g, (g->goal_scorer == 1) ? 'A' : 'B', label, sizeof(label));
+    char line[40];
+    snprintf(line, sizeof(line), "%s scores!", label);
     int len = strlen(line);
     int x_center = (128 - len * 6) / 2;
     if (x_center < 0) x_center = 0;
@@ -128,8 +133,10 @@ static void render_playing(const GameData *g) {
     // Title bar
     dogl128_fill_rect(0, 0, 128, 9);
     dogl128_invert_rect(0, 0, 128, 9);
-    char bar[24];
-    snprintf(bar, sizeof(bar), "%-7s       %7s", g->p1_name, g->p2_name);
+    char label_a[34], label_b[34], bar[42];
+    game_side_label(g, 'A', label_a, sizeof(label_a));
+    game_side_label(g, 'B', label_b, sizeof(label_b));
+    snprintf(bar, sizeof(bar), "%-9.9s   %9.9s", label_a, label_b);
     dogl128_draw_string(2, 1, bar);
     dogl128_invert_rect(0, 0, 128, 9);
 
@@ -183,8 +190,10 @@ static void render_game_over(const GameData *g) {
     dogl128_draw_string(36, 4, "GAME OVER");
     dogl128_invert_rect(2, 2, 124, 11);
 
-    char line[24];
-    const char *w = (g->winner==1) ? g->p1_name : (g->winner==2) ? g->p2_name : "DRAW";
+    char line[40], w[34];
+    if (g->winner == 1) game_side_label(g, 'A', w, sizeof(w));
+    else if (g->winner == 2) game_side_label(g, 'B', w, sizeof(w));
+    else snprintf(w, sizeof(w), "DRAW");
     snprintf(line, sizeof(line), "Winner: %s", w);
     dogl128_draw_string(8, 17, line);
     snprintf(line, sizeof(line), "Final: %d - %d", g->score_a, g->score_b);
@@ -207,9 +216,8 @@ void display_manager_render(const GameData *g) {
         return;
     }
     switch (g->state) {
-        case GAME_REGISTER_P1: render_register_p1(g); break;
-        case GAME_REGISTER_P2: render_register_p2(g); break;
-        case GAME_PLAYING:     render_playing(g);     break;
-        case GAME_OVER:        render_game_over(g);   break;
+        case GAME_WAITING: render_waiting(g);   break;
+        case GAME_PLAYING: render_playing(g);   break;
+        case GAME_OVER:    render_game_over(g); break;
     }
 }

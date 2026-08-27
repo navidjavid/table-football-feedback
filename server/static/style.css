@@ -427,6 +427,11 @@ form input[readonly] { color: var(--text-dim); }
 }
 .slot .empty { color: var(--text-dim); font-style: italic; }
 
+.muted { color: var(--text-dim); }
+.tournament-detail { margin-top: 4px; }
+.bracket-round { margin-bottom: 10px; }
+.bracket-round .slot { margin-bottom: 6px; }
+
 /* ---------- Mobile tweaks ---------- */
 
 @media (max-width: 600px) {

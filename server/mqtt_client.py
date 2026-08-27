@@ -304,6 +304,29 @@ def _handle_state(table_id: int, payload: dict) -> None:
     _refresh_snapshot_and_broadcast(table_id)
 
 
+def _maybe_advance_tournament(table_id: int, winner_player_id: int | None,
+                              match_id: int | None) -> None:
+    """If this table's just-finished match was an open tournament bracket
+    slot, record the result and let the bracket auto-advance the winner."""
+    if winner_player_id is None:
+        return
+    tm = db.find_open_tournament_match_by_table(table_id)
+    if not tm:
+        return
+    entries = db.list_tournament_entries(tm["tournament_id"])
+    winner_entry = next(
+        (e for e in entries if e["player_id"] == winner_player_id
+         and e["id"] in (tm["entry_a_id"], tm["entry_b_id"])),
+        None,
+    )
+    if not winner_entry:
+        log.warning("Table %s: tournament match %s finished but winner "
+                    "player %s isn't one of its two entries", table_id,
+                    tm["id"], winner_player_id)
+        return
+    db.record_tournament_match_result(tm["id"], winner_entry["id"], match_id)
+
+
 def _finish_match(table_id: int, score_a: int, score_b: int, fastest: float,
                   session_id: str | None, payload: dict) -> None:
     lt = db.get_live_table(table_id)
@@ -318,7 +341,7 @@ def _finish_match(table_id: int, score_a: int, score_b: int, fastest: float,
         for r in live_players if r["player_id"]
     ]
 
-    db.save_match(
+    match_id = db.save_match(
         table_id=table_id,
         mode=lt["mode"] or "1v1",
         score_a=score_a,
@@ -331,6 +354,7 @@ def _finish_match(table_id: int, score_a: int, score_b: int, fastest: float,
         session_id=session_id,
         players=players,
     )
+    _maybe_advance_tournament(table_id, winner_player["id"] if winner_player else None, match_id)
     db.update_live_table(
         table_id,
         state="GAME_OVER",

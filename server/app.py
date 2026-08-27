@@ -496,6 +496,123 @@ def api_admin_rename_player(player_id: int):
 
 
 # ---------------------------------------------------------------------------
+# Tournaments (single-elimination bracket)
+#
+# No dedicated UI page yet — these are plain JSON endpoints an admin panel
+# or bracket-view page can be built against. Bracket generation and
+# round-to-round advancement live in database.py; this layer is just
+# request validation and wiring a bracket match to a live table.
+# ---------------------------------------------------------------------------
+
+@app.route("/api/tournaments", methods=["GET"])
+def api_list_tournaments():
+    return jsonify({"tournaments": [dict(t) for t in db.list_tournaments()]})
+
+
+@app.route("/api/tournaments/<int:tournament_id>", methods=["GET"])
+def api_get_tournament(tournament_id: int):
+    t = db.get_tournament(tournament_id)
+    if not t:
+        abort(404)
+    return jsonify({
+        "tournament": dict(t),
+        "entries": [dict(e) for e in db.list_tournament_entries(tournament_id)],
+        "bracket": db.get_bracket(tournament_id),
+    })
+
+
+@app.route("/api/admin/tournaments", methods=["POST"])
+@admin_required
+def api_admin_create_tournament():
+    name = ((request.get_json(silent=True) or {}).get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    tournament_id = db.create_tournament(name)
+    return jsonify({"ok": True, "tournament_id": tournament_id})
+
+
+@app.route("/api/admin/tournaments/<int:tournament_id>/entries", methods=["POST"])
+@admin_required
+def api_admin_add_tournament_entry(tournament_id: int):
+    if not db.get_tournament(tournament_id):
+        abort(404)
+    data = request.get_json(silent=True) or {}
+    try:
+        player_id = int(data["player_id"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "player_id required"}), 400
+    seed = data.get("seed")
+    if not db.get_player(player_id):
+        return jsonify({"error": "player not found"}), 404
+    entry_id = db.add_tournament_entry(tournament_id, player_id,
+                                       int(seed) if seed is not None else None)
+    return jsonify({"ok": True, "entry_id": entry_id})
+
+
+@app.route("/api/admin/tournaments/<int:tournament_id>/delete", methods=["POST"])
+@admin_required
+def api_admin_delete_tournament(tournament_id: int):
+    if not db.get_tournament(tournament_id):
+        abort(404)
+    db.delete_tournament(tournament_id)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/admin/tournaments/<int:tournament_id>/start", methods=["POST"])
+@admin_required
+def api_admin_start_tournament(tournament_id: int):
+    if not db.get_tournament(tournament_id):
+        abort(404)
+    try:
+        db.generate_bracket(tournament_id)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, "bracket": db.get_bracket(tournament_id)})
+
+
+@app.route("/api/admin/tournaments/<int:tournament_id>/matches/<int:tm_id>/assign",
+          methods=["POST"])
+@admin_required
+def api_admin_assign_tournament_match(tournament_id: int, tm_id: int):
+    """Seats a pending bracket match's two entries onto a live table and
+    starts it — reuses the same live-table plumbing as manual admin
+    registration, so the match reports back through the normal /state
+    flow, and _maybe_advance_tournament() picks up the result when it
+    finishes."""
+    data = request.get_json(silent=True) or {}
+    try:
+        table_id = int(data["table_id"])
+    except (KeyError, TypeError, ValueError):
+        return jsonify({"error": "table_id required"}), 400
+    if not db.get_table(table_id):
+        return jsonify({"error": "table not found"}), 404
+
+    bracket = db.get_bracket(tournament_id)
+    tm = next((m for m in bracket if m["id"] == tm_id), None)
+    if not tm:
+        abort(404)
+    if tm["winner_entry_id"] is not None:
+        return jsonify({"error": "this bracket match is already decided"}), 400
+    if tm["entry_a_id"] is None or tm["entry_b_id"] is None:
+        return jsonify({"error": "this bracket match has a bye and doesn't need a table"}), 400
+
+    entries = {e["id"]: e for e in db.list_tournament_entries(tournament_id)}
+    entry_a, entry_b = entries[tm["entry_a_id"]], entries[tm["entry_b_id"]]
+
+    db.clear_live_players(table_id)
+    db.update_live_table(table_id, state="WAITING", mode=None, score_a=0, score_b=0,
+                         fastest_shot=0, winner_side=None, winner_player_id=None,
+                         session_id=None, started_at=None)
+    db.add_live_player(table_id, "A", 1, entry_a["player_id"], entry_a["rfid_uid"], None)
+    db.add_live_player(table_id, "B", 1, entry_b["player_id"], entry_b["rfid_uid"], None)
+    db.update_live_table(table_id, state="GAME_PLAYING", mode="1v1",
+                         started_at=db.utc_now())
+    db.assign_tournament_match_to_table(tm_id, table_id)
+    _refresh_table(table_id)
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------------
 

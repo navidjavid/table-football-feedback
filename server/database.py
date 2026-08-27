@@ -167,11 +167,28 @@ _SCHEMA = [
     CREATE TABLE IF NOT EXISTS tournament_matches (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         tournament_id INTEGER NOT NULL REFERENCES tournaments(id),
-        match_id INTEGER REFERENCES matches(id),
         round INTEGER NOT NULL,
-        bracket_position INTEGER NOT NULL
+        bracket_position INTEGER NOT NULL,
+        entry_a_id INTEGER REFERENCES tournament_entries(id),
+        entry_b_id INTEGER REFERENCES tournament_entries(id),
+        winner_entry_id INTEGER REFERENCES tournament_entries(id),
+        table_id INTEGER REFERENCES tables(id),
+        match_id INTEGER REFERENCES matches(id)
     )
     """,
+]
+
+# tournament_matches grew entry_a_id/entry_b_id/winner_entry_id/table_id
+# after its first "reserved, no UI yet" version shipped with only
+# (tournament_id, match_id, round, bracket_position). CREATE TABLE IF NOT
+# EXISTS won't add columns to an already-created table, so patch it in
+# for anyone who already has an old dev DB file lying around. No-op
+# (raises "duplicate column", which we swallow) once already migrated.
+_TOURNAMENT_MATCH_MIGRATIONS = [
+    "ALTER TABLE tournament_matches ADD COLUMN entry_a_id INTEGER REFERENCES tournament_entries(id)",
+    "ALTER TABLE tournament_matches ADD COLUMN entry_b_id INTEGER REFERENCES tournament_entries(id)",
+    "ALTER TABLE tournament_matches ADD COLUMN winner_entry_id INTEGER REFERENCES tournament_entries(id)",
+    "ALTER TABLE tournament_matches ADD COLUMN table_id INTEGER REFERENCES tables(id)",
 ]
 
 _INDEXES = [
@@ -188,6 +205,12 @@ def init_db() -> None:
     db = get_db()
     for stmt in _SCHEMA:
         db.execute(stmt)
+    for stmt in _TOURNAMENT_MATCH_MIGRATIONS:
+        try:
+            db.execute(stmt)
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                raise
     for stmt in _INDEXES:
         db.execute(stmt)
 
@@ -881,3 +904,228 @@ def registered_players_list() -> list[dict]:
         "SELECT rfid_uid, name FROM players ORDER BY id"
     ).fetchall()
     return [{"uid": r["rfid_uid"], "name": r["name"]} for r in rows]
+
+
+# ---------------------------------------------------------------------------
+# Tournaments (single-elimination bracket)
+#
+# An "entry" is one player occupying one bracket slot (2v2/team entries
+# aren't modeled — each tournament participant is a single player, same
+# granularity as `players`). A bracket is generated once from the entries
+# at tournament-start time; byes (odd/non-power-of-2 entry counts) are
+# auto-advanced immediately. Winners propagate round-to-round automatically
+# via record_tournament_match_result(), called from mqtt_client.py whenever
+# a live match tied to an open tournament_matches row finishes.
+# ---------------------------------------------------------------------------
+
+def create_tournament(name: str, fmt: str = "single_elim") -> int:
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO tournaments (name, format, status, created_at) VALUES (?, ?, 'pending', ?)",
+        (name, fmt, utc_now()),
+    )
+    return cur.lastrowid
+
+
+def delete_tournament(tournament_id: int) -> None:
+    """No ON DELETE CASCADE in the schema, so clear child rows first."""
+    db = get_db()
+    db.execute("DELETE FROM tournament_matches WHERE tournament_id = ?", (tournament_id,))
+    db.execute("DELETE FROM tournament_entries WHERE tournament_id = ?", (tournament_id,))
+    db.execute("DELETE FROM tournaments WHERE id = ?", (tournament_id,))
+
+
+def list_tournaments() -> list[sqlite3.Row]:
+    return get_db().execute(
+        "SELECT * FROM tournaments ORDER BY id DESC"
+    ).fetchall()
+
+
+def get_tournament(tournament_id: int) -> sqlite3.Row | None:
+    return get_db().execute(
+        "SELECT * FROM tournaments WHERE id = ?", (tournament_id,)
+    ).fetchone()
+
+
+def add_tournament_entry(tournament_id: int, player_id: int, seed: int | None = None) -> int:
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO tournament_entries (tournament_id, player_id, seed) VALUES (?, ?, ?)",
+        (tournament_id, player_id, seed),
+    )
+    return cur.lastrowid
+
+
+def list_tournament_entries(tournament_id: int) -> list[sqlite3.Row]:
+    return get_db().execute(
+        """
+        SELECT te.*, p.name AS player_name, p.rfid_uid
+        FROM tournament_entries te JOIN players p ON p.id = te.player_id
+        WHERE te.tournament_id = ?
+        ORDER BY te.seed IS NULL, te.seed, te.id
+        """,
+        (tournament_id,),
+    ).fetchall()
+
+
+def _tm_row(tm_id: int) -> sqlite3.Row | None:
+    return get_db().execute(
+        "SELECT * FROM tournament_matches WHERE id = ?", (tm_id,)
+    ).fetchone()
+
+
+def generate_bracket(tournament_id: int) -> None:
+    """Creates round-1 matches from the current entries and auto-advances
+    any byes. Raises ValueError if there are fewer than 2 entries or the
+    tournament already has a bracket."""
+    db = get_db()
+    existing = db.execute(
+        "SELECT COUNT(*) AS n FROM tournament_matches WHERE tournament_id = ?",
+        (tournament_id,),
+    ).fetchone()["n"]
+    if existing:
+        raise ValueError("bracket already generated for this tournament")
+
+    entries = list_tournament_entries(tournament_id)
+    n = len(entries)
+    if n < 2:
+        raise ValueError("need at least 2 entries to start a bracket")
+
+    size = 1
+    while size < n:
+        size *= 2
+    num_byes = size - n
+
+    # Byes go to the top seeds (entries are already ordered by seed, then
+    # insertion order) and each gets its own match slot paired against
+    # nothing — never two byes sharing a match, which would create an
+    # empty slot that can never produce a winner to advance.
+    bye_entries = entries[:num_byes]
+    paired_entries = entries[num_byes:]
+
+    pairs: list[tuple[int, int | None]] = [(e["id"], None) for e in bye_entries]
+    for i in range(0, len(paired_entries), 2):
+        pairs.append((paired_entries[i]["id"], paired_entries[i + 1]["id"]))
+
+    new_ids = []
+    for i, (a, b) in enumerate(pairs):
+        cur = db.execute(
+            "INSERT INTO tournament_matches "
+            "(tournament_id, round, bracket_position, entry_a_id, entry_b_id) "
+            "VALUES (?, 1, ?, ?, ?)",
+            (tournament_id, i, a, b),
+        )
+        new_ids.append(cur.lastrowid)
+
+    db.execute("UPDATE tournaments SET status = 'active' WHERE id = ?", (tournament_id,))
+    for tm_id in new_ids:
+        _maybe_auto_advance_bye(tournament_id, tm_id)
+
+
+def _maybe_auto_advance_bye(tournament_id: int, tm_id: int) -> None:
+    tm = _tm_row(tm_id)
+    if not tm or tm["winner_entry_id"] is not None:
+        return
+    # Byes only ever exist by construction in round 1 (generate_bracket()
+    # is the only place a match is deliberately created with one slot
+    # permanently null). A round > 1 match with only one slot filled is
+    # NOT a bye — it's a real match still waiting on its other feeder
+    # match to actually be played. Auto-advancing it here would let one
+    # bye-recipient skip an entire round without ever facing an opponent.
+    if tm["round"] != 1:
+        return
+    has_a, has_b = tm["entry_a_id"] is not None, tm["entry_b_id"] is not None
+    if has_a and not has_b:
+        _advance_winner(tournament_id, tm, tm["entry_a_id"], None)
+    elif has_b and not has_a:
+        _advance_winner(tournament_id, tm, tm["entry_b_id"], None)
+
+
+def _advance_winner(tournament_id: int, tm: sqlite3.Row, winner_entry_id: int,
+                    match_id: int | None) -> None:
+    db = get_db()
+    db.execute(
+        "UPDATE tournament_matches SET winner_entry_id = ?, match_id = ? WHERE id = ?",
+        (winner_entry_id, match_id, tm["id"]),
+    )
+
+    round_size = db.execute(
+        "SELECT COUNT(*) AS n FROM tournament_matches WHERE tournament_id = ? AND round = ?",
+        (tournament_id, tm["round"]),
+    ).fetchone()["n"]
+    if round_size == 1:
+        db.execute("UPDATE tournaments SET status = 'completed' WHERE id = ?", (tournament_id,))
+        return
+
+    next_round = tm["round"] + 1
+    next_pos = tm["bracket_position"] // 2
+    slot_col = "entry_a_id" if tm["bracket_position"] % 2 == 0 else "entry_b_id"
+
+    next_row = db.execute(
+        "SELECT * FROM tournament_matches WHERE tournament_id = ? AND round = ? AND bracket_position = ?",
+        (tournament_id, next_round, next_pos),
+    ).fetchone()
+    if next_row is None:
+        cur = db.execute(
+            f"INSERT INTO tournament_matches (tournament_id, round, bracket_position, {slot_col}) "
+            f"VALUES (?, ?, ?, ?)",
+            (tournament_id, next_round, next_pos, winner_entry_id),
+        )
+        new_id = cur.lastrowid
+    else:
+        db.execute(
+            f"UPDATE tournament_matches SET {slot_col} = ? WHERE id = ?",
+            (winner_entry_id, next_row["id"]),
+        )
+        new_id = next_row["id"]
+
+    _maybe_auto_advance_bye(tournament_id, new_id)
+
+
+def record_tournament_match_result(tm_id: int, winner_entry_id: int,
+                                   match_id: int | None) -> None:
+    """Called once a live match tied to this bracket slot finishes."""
+    tm = _tm_row(tm_id)
+    if not tm or tm["winner_entry_id"] is not None:
+        return
+    _advance_winner(tm["tournament_id"], tm, winner_entry_id, match_id)
+
+
+def find_open_tournament_match_by_table(table_id: int) -> sqlite3.Row | None:
+    """The most recent bracket slot assigned to this table that hasn't
+    been decided yet — used to detect that a just-finished live match was
+    actually a tournament match."""
+    return get_db().execute(
+        "SELECT * FROM tournament_matches WHERE table_id = ? AND winner_entry_id IS NULL "
+        "ORDER BY id DESC LIMIT 1",
+        (table_id,),
+    ).fetchone()
+
+
+def assign_tournament_match_to_table(tm_id: int, table_id: int) -> None:
+    get_db().execute(
+        "UPDATE tournament_matches SET table_id = ? WHERE id = ?", (table_id, tm_id)
+    )
+
+
+def get_bracket(tournament_id: int) -> list[dict]:
+    """Every round's matches with entry names resolved, for a future
+    bracket UI (or just JSON inspection) to render."""
+    rows = get_db().execute(
+        """
+        SELECT tm.*,
+               pa.name AS entry_a_name, pb.name AS entry_b_name,
+               pw.name AS winner_name
+        FROM tournament_matches tm
+        LEFT JOIN tournament_entries ea ON ea.id = tm.entry_a_id
+        LEFT JOIN tournament_entries eb ON eb.id = tm.entry_b_id
+        LEFT JOIN tournament_entries ew ON ew.id = tm.winner_entry_id
+        LEFT JOIN players pa ON pa.id = ea.player_id
+        LEFT JOIN players pb ON pb.id = eb.player_id
+        LEFT JOIN players pw ON pw.id = ew.player_id
+        WHERE tm.tournament_id = ?
+        ORDER BY tm.round, tm.bracket_position
+        """,
+        (tournament_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]

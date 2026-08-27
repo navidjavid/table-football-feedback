@@ -55,17 +55,22 @@ SEL1 = ON   (switch 2 up)
 
 | Connection                      | Value        |
 |---------------------------------|--------------|
-| Pin 29 (CAP1P) ── Pin 30 (CAP1N)| 1µF ceramic  |
+| Pin 21 (V0)   ── GND            | 1µF ceramic  |
+| Pin 22 (V1)   ── GND            | 1µF ceramic  |
+| Pin 23 (V2)   ── GND            | 1µF ceramic  |
+| Pin 24 (V3)   ── GND            | 1µF ceramic  |
+| Pin 25 (V4)   ── GND            | 1µF ceramic  |
 | Pin 28 (CAP2P) ── Pin 27 (CAP2N)| 1µF ceramic  |
-| Pin 31 (CAP3P) ── GND           | 1µF ceramic  |
-| Pin 32 (VOUT)  ── GND           | 4.7µF electrolytic (+ leg on pin 32) |
-| Pin 21 (V0) ── Pin 22 (V1)      | 1µF ceramic  |
-| Pin 22 (V1) ── Pin 23 (V2)      | 1µF ceramic  |
-| Pin 23 (V2) ── Pin 24 (V3)      | 1µF ceramic  |
-| Pin 24 (V3) ── Pin 25 (V4)      | 1µF ceramic  |
-| Pin 25 (V4) ── GND              | 1µF ceramic  |
+| Pin 31 (CAP3P) ── Pin 30 (CAP1N)| 1µF ceramic  |
+| Pin 30 (CAP1N) ── Pin 29 (CAP1P)| 1µF ceramic  |
+| Pin 32 (VOUT)  ── GND           | 4.7µF ceramic or electrolytic (+ leg on pin 32 if electrolytic) |
 
 > Total: 9 capacitors. All required. Missing any one will prevent the display from working.
+>
+> Note: V0–V4 are each an **independent** capacitor to GND (not a series chain between
+> adjacent V pins), and CAP3P connects to CAP1N (not directly to GND) — CAP3P, CAP1N,
+> and CAP1P form a single two-capacitor chain. An earlier version of this table had both
+> of these wrong; this is the corrected, datasheet-verified wiring.
 
 ---
 

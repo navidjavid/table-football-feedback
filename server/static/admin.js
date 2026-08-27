@@ -7,9 +7,12 @@
   const picosBody = document.querySelector("#picos-table tbody");
   const tablesList = document.getElementById("tables-list");
   const adminPlayersBody = document.querySelector("#admin-players-table tbody");
+  const tournamentsList = document.getElementById("tournaments-list");
 
   let cachedTables = [];
   let cachedPlayers = [];
+  let cachedTournaments = [];
+  let expandedTournamentId = null;
 
   refreshAll();
   setInterval(refreshAll, 3000);
@@ -32,6 +35,18 @@
     } else { alert(r.error || "Failed to create table"); }
   });
 
+  document.getElementById("create-tournament-form").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const nameInput = document.getElementById("new-tournament-name");
+    const name = nameInput.value.trim();
+    if (!name) return;
+    const r = await postJSON("/api/admin/tournaments", {name});
+    if (r.ok) {
+      nameInput.value = "";
+      refreshAll();
+    } else { alert(r.error || "Failed to create tournament"); }
+  });
+
   // Generic prompt modal close handlers.
   document.querySelectorAll(".modal").forEach((m) => {
     m.addEventListener("click", (e) => {
@@ -40,7 +55,7 @@
   });
 
   async function refreshAll() {
-    await Promise.all([refreshPicos(), refreshTables(), refreshPlayers()]);
+    await Promise.all([refreshPicos(), refreshTables(), refreshPlayers(), refreshTournaments()]);
   }
 
   // -------- Picos --------
@@ -263,6 +278,169 @@
                     });
       });
     });
+  }
+
+  // -------- Tournaments --------
+
+  async function refreshTournaments() {
+    const data = await getJSON("/api/tournaments");
+    if (!data || !Array.isArray(data.tournaments)) return;
+    cachedTournaments = data.tournaments;
+
+    let detail = null;
+    if (expandedTournamentId != null) {
+      detail = await getJSON(`/api/tournaments/${expandedTournamentId}`);
+    }
+
+    tournamentsList.innerHTML = cachedTournaments.length
+      ? cachedTournaments.map((t) => tournamentCard(t, detail)).join("")
+      : `<p class="muted">No tournaments yet.</p>`;
+
+    tournamentsList.querySelectorAll("[data-t-action]").forEach((el) => {
+      el.addEventListener("click", () => onTournamentAction(el));
+    });
+  }
+
+  function tournamentCard(t, detail) {
+    const expanded = expandedTournamentId === t.id;
+    const body = expanded && detail ? tournamentDetailHTML(t, detail) : "";
+    return `
+    <div class="admin-table-card" data-t-id="${t.id}">
+      <header>
+        <strong>${esc(t.name)}</strong>
+        <span class="badge ${tBadgeCls(t.status)}">${esc(t.status)}</span>
+        <span style="margin-left:auto" class="admin-actions">
+          <button class="btn" data-t-action="toggle" data-t-id="${t.id}">${expanded ? "Hide" : "Manage"}</button>
+          <button class="btn btn-danger" data-t-action="delete" data-t-id="${t.id}">Delete</button>
+        </span>
+      </header>
+      ${body}
+    </div>`;
+  }
+
+  function tBadgeCls(s) {
+    if (s === "active") return "playing";
+    if (s === "completed") return "over";
+    return "waiting";
+  }
+
+  function tournamentDetailHTML(t, detail) {
+    const entries = detail.entries || [];
+    const bracket = detail.bracket || [];
+
+    const entriesHTML = entries.length
+      ? entries.map((e) => `
+        <div class="slot">
+          <span>${esc(e.player_name)}${e.seed != null ? ` (seed ${esc(e.seed)})` : ""}</span>
+        </div>`).join("")
+      : `<div class="slot"><span class="empty">No entries yet</span></div>`;
+
+    const roundsHTML = bracket.length
+      ? bracketHTML(t, bracket)
+      : `<p class="muted">Start the tournament to generate the bracket.</p>`;
+
+    return `
+    <div class="tournament-detail">
+      <div class="slots">
+        <div>
+          <div style="font-size:12px;margin-bottom:4px;">Entries</div>
+          ${entriesHTML}
+          ${t.status === "pending" ? `
+            <div class="inline-form" style="margin-top:8px;">
+              <button class="btn" data-t-action="add-entry" data-t-id="${t.id}">Add Player</button>
+              <button class="btn btn-primary" data-t-action="start" data-t-id="${t.id}">Start Tournament</button>
+            </div>` : ""}
+        </div>
+        <div>
+          <div style="font-size:12px;margin-bottom:4px;">Bracket</div>
+          ${roundsHTML}
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function bracketHTML(t, bracket) {
+    const rounds = {};
+    bracket.forEach((m) => { (rounds[m.round] = rounds[m.round] || []).push(m); });
+    const roundNums = Object.keys(rounds).map(Number).sort((a, b) => a - b);
+
+    return roundNums.map((r) => `
+      <div class="bracket-round">
+        <div class="muted" style="font-size:11px;">Round ${r}</div>
+        ${rounds[r].map((m) => matchHTML(t, m)).join("")}
+      </div>`).join("");
+  }
+
+  function matchHTML(t, m) {
+    const a = m.entry_a_name || (m.entry_a_id ? "?" : "BYE");
+    const b = m.entry_b_name || (m.entry_b_id ? "?" : "BYE");
+    const decided = m.winner_entry_id != null;
+    const winnerIsA = decided && m.winner_entry_id === m.entry_a_id;
+    const needsTable = !decided && m.entry_a_id != null && m.entry_b_id != null;
+
+    const tableOptions = cachedTables.map((tb) =>
+      `<option value="${tb.table_id}">${esc(tb.name)}</option>`).join("");
+
+    return `
+    <div class="slot" style="flex-direction:column;align-items:flex-start;gap:4px;">
+      <span>
+        <span style="${winnerIsA ? "font-weight:700;" : ""}">${esc(a)}</span>
+        &nbsp;vs&nbsp;
+        <span style="${decided && !winnerIsA ? "font-weight:700;" : ""}">${esc(b)}</span>
+        ${decided ? `<span class="badge over">won: ${esc(m.winner_name || "")}</span>` : ""}
+        ${!decided && !needsTable ? `<span class="badge waiting">pending</span>` : ""}
+      </span>
+      ${needsTable ? `
+        <span class="inline-form" style="margin:0;">
+          <select data-assign-match="${m.id}">
+            <option value="">Assign to table…</option>
+            ${tableOptions}
+          </select>
+          <button class="btn" data-t-action="assign" data-t-id="${t.id}" data-match-id="${m.id}">Go</button>
+        </span>` : ""}
+    </div>`;
+  }
+
+  async function onTournamentAction(el) {
+    const id = Number(el.dataset.tId);
+    const action = el.dataset.tAction;
+
+    if (action === "toggle") {
+      expandedTournamentId = (expandedTournamentId === id) ? null : id;
+      refreshTournaments();
+      return;
+    }
+    if (action === "delete") {
+      if (!confirm("Delete this tournament and its bracket? This can't be undone.")) return;
+      const r = await postJSON(`/api/admin/tournaments/${id}/delete`, {});
+      if (!r.ok) { alert(r.error || "Failed to delete tournament"); return; }
+      if (expandedTournamentId === id) expandedTournamentId = null;
+      refreshAll();
+      return;
+    }
+    if (action === "add-entry") {
+      const list = cachedPlayers
+        .map((p) => `${p.id}: ${p.name}${p.is_guest ? " (Guest)" : ""}`)
+        .join("\n");
+      const raw = prompt("Player ID to add as a tournament entry:\n\n" + list);
+      const pid = Number(raw);
+      if (!Number.isInteger(pid)) return;
+      const r = await postJSON(`/api/admin/tournaments/${id}/entries`, {player_id: pid});
+      if (!r.ok) { alert(r.error || "Failed to add entry"); return; }
+    } else if (action === "start") {
+      if (!confirm("Generate the bracket from current entries? Entries can't be changed afterwards.")) return;
+      const r = await postJSON(`/api/admin/tournaments/${id}/start`, {});
+      if (!r.ok) { alert(r.error || "Failed to start tournament"); return; }
+    } else if (action === "assign") {
+      const matchId = el.dataset.matchId;
+      const sel = tournamentsList.querySelector(`select[data-assign-match="${matchId}"]`);
+      const tableId = sel ? Number(sel.value) : NaN;
+      if (!Number.isInteger(tableId) || !tableId) { alert("Pick a table first"); return; }
+      const r = await postJSON(`/api/admin/tournaments/${id}/matches/${matchId}/assign`,
+                               {table_id: tableId});
+      if (!r.ok) { alert(r.error || "Failed to assign match"); return; }
+    }
+    refreshAll();
   }
 
   // -------- Prompt modal --------

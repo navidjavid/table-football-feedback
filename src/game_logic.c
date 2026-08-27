@@ -4,7 +4,9 @@
 #include <stdio.h>
 
 // ---------------------------------------------------------------------------
-// Known players
+// Known players — local best-guess only. The Pi's player database is
+// authoritative; main.c's on_pi_player() corrects a seated name here once
+// the server resolves the tap against its real records.
 // ---------------------------------------------------------------------------
 typedef struct { uint8_t uid[4]; const char *name; } KnownPlayer;
 
@@ -23,56 +25,100 @@ const char* game_lookup_player(const uint8_t uid[4]) {
     return NULL;
 }
 
-static void _start_p1(GameData *g, const uint8_t uid[4], const char *name) {
-    memcpy(g->p1_uid, uid, 4);
-    strncpy(g->p1_name, name ? name : "Guest", NAME_LEN - 1);
-    g->p1_name[NAME_LEN - 1] = '\0';
-    g->state = GAME_REGISTER_P2;
-    printf("[GAME] P1 = %s\n", g->p1_name);
-}
-
-static void _start_p2(GameData *g, const uint8_t uid[4], const char *name) {
-    memcpy(g->p2_uid, uid, 4);
-    strncpy(g->p2_name, name ? name : "Guest", NAME_LEN - 1);
-    g->p2_name[NAME_LEN - 1] = '\0';
-    g->state               = GAME_PLAYING;
-    g->score_a             = 0;
-    g->score_b             = 0;
-    g->fastest_kmh         = 0;
-    g->goal_anim_end_ms    = 0;
-    g->goal_scorer         = 0;
-    g->_score_initialized  = false;
-    g->game_start_ms       = to_ms_since_boot(get_absolute_time());
-    g->game_end_ms         = 0;
-    g->winner              = 0;
-    printf("[GAME] P2 = %s -> PLAYING\n", g->p2_name);
-}
-
 void game_init(GameData *g) {
     memset(g, 0, sizeof(*g));
-    g->state = GAME_REGISTER_P1;
-    strcpy(g->p1_name, "---");
-    strcpy(g->p2_name, "---");
+    g->state = GAME_WAITING;
 }
 
-void game_register_player(GameData *g, const uint8_t uid[4],
+static PlayerSlot* _side_slots(GameData *g, char side) {
+    return (side == 'A') ? g->side_a : g->side_b;
+}
+
+static bool _side_has_uid(const PlayerSlot slots[MAX_PLAYERS_PER_SIDE],
+                           const uint8_t uid[4]) {
+    for (int i = 0; i < MAX_PLAYERS_PER_SIDE; i++)
+        if (slots[i].filled && memcmp(slots[i].uid, uid, 4) == 0)
+            return true;
+    return false;
+}
+
+static bool _side_ready(const PlayerSlot slots[MAX_PLAYERS_PER_SIDE]) {
+    return slots[0].filled;
+}
+
+static void _start_playing(GameData *g) {
+    g->state              = GAME_PLAYING;
+    g->score_a            = 0;
+    g->score_b            = 0;
+    g->fastest_kmh        = 0;
+    g->goal_anim_end_ms   = 0;
+    g->goal_scorer        = 0;
+    g->_score_initialized = false;
+    g->game_start_ms      = to_ms_since_boot(get_absolute_time());
+    g->game_end_ms        = 0;
+    g->winner             = 0;
+    printf("[GAME] Both sides ready -> PLAYING\n");
+}
+
+void game_register_player(GameData *g, char side, const uint8_t uid[4],
                            const char *name) {
-    switch (g->state) {
-        case GAME_REGISTER_P1:
-            _start_p1(g, uid, name);
-            break;
-        case GAME_REGISTER_P2:
-            if (memcmp(uid, g->p1_uid, 4) == 0) {
-                printf("[GAME] Same card as P1\n");
-                return;
-            }
-            _start_p2(g, uid, name);
-            break;
-        case GAME_OVER:
-            game_init(g);
-            _start_p1(g, uid, name);
-            break;
-        default: break;
+    if (side != 'A' && side != 'B') return;
+
+    // A tap after GAME_OVER starts a fresh match: clear everyone and
+    // re-seat this tap as the first player of its side.
+    if (g->state == GAME_OVER) {
+        game_init(g);
+    }
+
+    PlayerSlot *mine   = _side_slots(g, side);
+    PlayerSlot *theirs = _side_slots(g, side == 'A' ? 'B' : 'A');
+
+    if (_side_has_uid(mine, uid) || _side_has_uid(theirs, uid)) {
+        printf("[GAME] UID already seated, ignoring repeat tap\n");
+        return;
+    }
+
+    int slot = -1;
+    for (int i = 0; i < MAX_PLAYERS_PER_SIDE; i++) {
+        if (!mine[i].filled) { slot = i; break; }
+    }
+    if (slot < 0) {
+        printf("[GAME] Side %c already full\n", side);
+        return;
+    }
+
+    mine[slot].filled = true;
+    memcpy(mine[slot].uid, uid, 4);
+    strncpy(mine[slot].name, name ? name : "Guest", NAME_LEN - 1);
+    mine[slot].name[NAME_LEN - 1] = '\0';
+    printf("[GAME] Side %c slot %d = %s\n", side, slot + 1, mine[slot].name);
+
+    bool was_playing = (g->state == GAME_PLAYING);
+    if (!was_playing && _side_ready(g->side_a) && _side_ready(g->side_b)) {
+        _start_playing(g);
+    }
+}
+
+void game_sync_roster_slot(GameData *g, char side, int slot, bool filled,
+                           const char *name, const uint8_t uid[4]) {
+    if (side != 'A' && side != 'B') return;
+    if (slot < 1 || slot > MAX_PLAYERS_PER_SIDE) return;
+
+    PlayerSlot *s = &_side_slots(g, side)[slot - 1];
+    s->filled = filled;
+    if (filled) {
+        strncpy(s->name, name ? name : "Guest", NAME_LEN - 1);
+        s->name[NAME_LEN - 1] = '\0';
+        if (uid) memcpy(s->uid, uid, 4);
+    } else {
+        s->name[0] = '\0';
+        memset(s->uid, 0, 4);
+    }
+}
+
+void game_recheck_start(GameData *g) {
+    if (g->state == GAME_WAITING && _side_ready(g->side_a) && _side_ready(g->side_b)) {
+        _start_playing(g);
     }
 }
 
@@ -136,11 +182,11 @@ void game_update(GameData *g, const BallData *ball) {
     if (g->score_a >= MAX_SCORE) {
         g->state = GAME_OVER; g->winner = 1;
         g->game_end_ms = now;
-        printf("[GAME] %s wins!\n", g->p1_name);
+        printf("[GAME] Side A wins!\n");
     } else if (g->score_b >= MAX_SCORE) {
         g->state = GAME_OVER; g->winner = 2;
         g->game_end_ms = now;
-        printf("[GAME] %s wins!\n", g->p2_name);
+        printf("[GAME] Side B wins!\n");
     }
 }
 
@@ -158,10 +204,20 @@ uint32_t game_elapsed_seconds(const GameData *g) {
 
 const char* game_state_label(GameState s) {
     switch (s) {
-        case GAME_REGISTER_P1: return "REG_P1";
-        case GAME_REGISTER_P2: return "REG_P2";
-        case GAME_PLAYING:     return "PLAYING";
-        case GAME_OVER:        return "GAME_OVER";
+        case GAME_WAITING: return "WAITING";
+        case GAME_PLAYING: return "PLAYING";
+        case GAME_OVER:    return "GAME_OVER";
         default: return "?";
+    }
+}
+
+void game_side_label(const GameData *g, char side, char *out, size_t out_sz) {
+    const PlayerSlot *slots = (side == 'A') ? g->side_a : g->side_b;
+    if (!slots[0].filled) {
+        snprintf(out, out_sz, "---");
+    } else if (slots[1].filled) {
+        snprintf(out, out_sz, "%s+%s", slots[0].name, slots[1].name);
+    } else {
+        snprintf(out, out_sz, "%s", slots[0].name);
     }
 }

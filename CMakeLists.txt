@@ -87,3 +87,25 @@ pico_enable_stdio_uart(test_i2c_simulator 0)
 pico_enable_stdio_usb(test_i2c_simulator 1)
 target_link_libraries(test_i2c_simulator pico_stdlib hardware_i2c m)
 pico_add_extra_outputs(test_i2c_simulator)
+
+# --- PN532 standalone SPI test (RFID only, no display/I2C/WiFi) ---
+add_executable(test_pn532 tests/test_pn532.c)
+pico_enable_stdio_uart(test_pn532 0)
+pico_enable_stdio_usb(test_pn532 1)
+target_link_libraries(test_pn532 pico_stdlib hardware_spi)
+pico_add_extra_outputs(test_pn532)
+
+# --- PN532 test using the real production driver (lib/pn532/pn532.c) ---
+add_executable(test_pn532_lib tests/test_pn532_lib.c)
+target_include_directories(test_pn532_lib PRIVATE ${CMAKE_CURRENT_LIST_DIR}/lib/pn532)
+pico_enable_stdio_uart(test_pn532_lib 0)
+pico_enable_stdio_usb(test_pn532_lib 1)
+target_link_libraries(test_pn532_lib pico_stdlib hardware_spi pn532_lib)
+pico_add_extra_outputs(test_pn532_lib)
+
+# --- I2C bus scanner (protocol-independent PN532 aliveness test) ---
+add_executable(test_i2c_scan tests/test_i2c_scan.c)
+pico_enable_stdio_uart(test_i2c_scan 0)
+pico_enable_stdio_usb(test_i2c_scan 1)
+target_link_libraries(test_i2c_scan pico_stdlib hardware_i2c)
+pico_add_extra_outputs(test_i2c_scan)
