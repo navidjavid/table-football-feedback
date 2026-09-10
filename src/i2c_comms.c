@@ -84,15 +84,6 @@ void i2c_comms_poll(BallData *out) {
     out->valid = false;
     int avail = (_head - _tail + RING_SIZE) % RING_SIZE;
 
-    // DEBUG: confirms bytes are actually reaching the ring buffer —
-    // remove once the PN532-wait/I2C-IRQ fix is confirmed in the field.
-    static uint32_t last_print = 0;
-    uint32_t now = to_ms_since_boot(get_absolute_time());
-    if (now - last_print > 5000) {
-        printf("[I2C DBG] avail=%d head=%d tail=%d\n", avail, _head, _tail);
-        last_print = now;
-    }
-
     // Scan for either a ball packet (SYNC_A/SYNC_B) or a peer-tap message
     // (REG_SYNC_A/REG_SYNC_B) — they share this one byte stream. A ball
     // packet match returns immediately (existing behavior, one BallData

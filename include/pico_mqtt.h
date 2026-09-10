@@ -51,6 +51,14 @@ void mqtt_app_on_sync(mqtt_sync_cb_t cb);
 typedef void (*mqtt_rfid_cb_t)(const char *side, int slot, const char *uid_hex);
 void mqtt_app_on_rfid(mqtt_rfid_cb_t cb);
 
+// Admin-panel command, from the dashboard's Pico Devices controls:
+// tablefootball/pico/<pico_id>/cmd — cmd is one of "identify",
+// "reset_match", "clear_players", "show_message" (message only set for
+// the latter). Previously published by the server with no firmware-side
+// subscriber at all — the admin buttons silently did nothing.
+typedef void (*mqtt_cmd_cb_t)(const char *cmd, const char *message);
+void mqtt_app_on_cmd(mqtt_cmd_cb_t cb);
+
 // tablefootball/pico/<pico_id>/heartbeat
 void mqtt_publish_heartbeat(const char *pico_id, int table_id,
                              const char *side, const char *role,

@@ -112,6 +112,24 @@ def _handle_status_lwt(pico_id: str, payload: dict) -> None:
         state.broadcast("pico_status", {"pico_id": pico_id, "online": False})
 
 
+def clear_stale_roster_if_needed(table_id: int, lt):
+    """If the table is sitting in a finished/abandoned state, clear the
+    previous match's roster and reset to WAITING before anything re-seeds
+    it. Shared by every entry point that can add a fresh player to a
+    table (RFID tap, admin add_player) — previously only the RFID path
+    did this, so seating a player through the admin panel after a match
+    ended could silently inherit the last match's stale roster/score.
+    Returns the (possibly refreshed) live_table row."""
+    if lt["state"] in ("GAME_OVER", "ABANDONED"):
+        db.clear_live_players(table_id)
+        db.update_live_table(table_id, state="WAITING", mode=None,
+                             score_a=0, score_b=0, fastest_shot=0,
+                             winner_side=None, winner_player_id=None,
+                             session_id=None, started_at=None)
+        return db.get_live_table(table_id)
+    return lt
+
+
 def _handle_rfid(table_id: int, payload: dict) -> None:
     uid = _normalize_uid(payload.get("uid"))
     pico_id = payload.get("pico_id")
@@ -129,15 +147,7 @@ def _handle_rfid(table_id: int, payload: dict) -> None:
         log.warning("RFID for unknown table %s", table_id)
         return
 
-    if lt["state"] in ("GAME_OVER", "ABANDONED"):
-        # Previous match's roster is still sitting in live_players (kept
-        # around so the GAME_OVER banner/team list can show who just
-        # played). The first tap of a new game must start from a clean
-        # slate, otherwise this tap gets misread as a deregister of a
-        # stale entry, or the side appears "full" and the tap is ignored.
-        db.clear_live_players(table_id)
-        db.update_live_table(table_id, state="WAITING", mode=None)
-        lt = db.get_live_table(table_id)
+    lt = clear_stale_roster_if_needed(table_id, lt)
 
     player = db.get_or_create_player_by_uid(uid)
 
@@ -279,12 +289,9 @@ def _handle_state(table_id: int, payload: dict) -> None:
     session_id = payload.get("session_id") or lt["session_id"]
     pico_reported = payload.get("state")
 
-    updates: dict[str, Any] = {
-        "score_a": score_a,
-        "score_b": score_b,
-        "fastest_shot": fastest,
-        "session_id": session_id,
-    }
+    updates: dict[str, Any] = {}
+    will_be_playing = lt["state"] == "GAME_PLAYING"
+
     if lt["state"] in ("PLAYERS_REGISTERING", "WAITING") and pico_reported == "GAME_PLAYING":
         # Server normally drives the transition, but if the Pico starts a game
         # while both slot 1s are filled we honor it.
@@ -295,11 +302,26 @@ def _handle_state(table_id: int, payload: dict) -> None:
             updates["mode"] = _compute_mode(team_a, team_b)
             if not lt["started_at"]:
                 updates["started_at"] = db.utc_now()
+            will_be_playing = True
 
     if pico_reported == "GAME_OVER" and lt["state"] != "GAME_OVER":
         _finish_match(table_id, score_a, score_b, fastest, session_id, payload)
         return  # _finish_match already refreshes
 
+    if will_be_playing:
+        # Only trust the Pico's score/fastest/session fields once the
+        # table actually is (or just became) GAME_PLAYING. Previously
+        # these were written unconditionally, so a stray premature report
+        # — e.g. a ball-sensor blip before the second player even
+        # registered — could write a nonzero score onto a table the
+        # server still considers not-yet-started.
+        updates["score_a"] = score_a
+        updates["score_b"] = score_b
+        updates["fastest_shot"] = fastest
+        updates["session_id"] = session_id
+
+    if not updates:
+        return
     db.update_live_table(table_id, **updates)
     _refresh_snapshot_and_broadcast(table_id)
 

@@ -16,11 +16,13 @@ static char _will_topic[48];
 static char _player_topic[48];
 static char _sync_topic[48];
 static char _rfid_topic[48];
+static char _cmd_topic[48];
 static const char _will_msg[] = "{\"online\":false}";
 
 static mqtt_player_cb_t _player_cb;
 static mqtt_sync_cb_t   _sync_cb;
 static mqtt_rfid_cb_t   _rfid_cb;
+static mqtt_cmd_cb_t    _cmd_cb;
 
 // Incoming-publish reassembly buffer. lwIP delivers a subscribed
 // message's payload in one or more chunks via _incoming_data_cb();
@@ -176,6 +178,13 @@ static void _route_incoming(const char *topic, const char *payload) {
         _json_str(payload, "uid", uid, sizeof(uid));
         _json_int(payload, "slot", &slot);
         _rfid_cb(side, slot, uid);
+    } else if (strcmp(topic, _cmd_topic) == 0) {
+        if (!_cmd_cb) return;
+        char cmd[24] = "";
+        char message[68] = "";
+        _json_str(payload, "cmd", cmd, sizeof(cmd));
+        _json_str(payload, "message", message, sizeof(message));
+        _cmd_cb(cmd, message);
     }
 }
 
@@ -204,6 +213,7 @@ static void _subscribe_all(void) {
     mqtt_subscribe(_client, _player_topic, 1, _sub_request_cb, (void *)_player_topic);
     mqtt_subscribe(_client, _sync_topic,   1, _sub_request_cb, (void *)_sync_topic);
     mqtt_subscribe(_client, _rfid_topic,   1, _sub_request_cb, (void *)_rfid_topic);
+    mqtt_subscribe(_client, _cmd_topic,    1, _sub_request_cb, (void *)_cmd_topic);
 }
 
 static void _connection_cb(mqtt_client_t *client, void *arg,
@@ -275,6 +285,7 @@ void mqtt_app_init(const char *broker_ip, uint16_t port,
     snprintf(_player_topic, sizeof(_player_topic), "tablefootball/pico/%s/player", client_id);
     snprintf(_sync_topic, sizeof(_sync_topic), "tablefootball/table/%d/sync", table_id);
     snprintf(_rfid_topic, sizeof(_rfid_topic), "tablefootball/table/%d/rfid", table_id);
+    snprintf(_cmd_topic, sizeof(_cmd_topic), "tablefootball/pico/%s/cmd", client_id);
 
     _client = mqtt_client_new();
     if (!_client) {
@@ -292,6 +303,7 @@ bool mqtt_app_connected(void) {
 void mqtt_app_on_player(mqtt_player_cb_t cb) { _player_cb = cb; }
 void mqtt_app_on_sync(mqtt_sync_cb_t cb)     { _sync_cb = cb; }
 void mqtt_app_on_rfid(mqtt_rfid_cb_t cb)     { _rfid_cb = cb; }
+void mqtt_app_on_cmd(mqtt_cmd_cb_t cb)       { _cmd_cb = cb; }
 
 // If lwIP has closed the underlying TCP connection behind our back,
 // fall back to LINK_IDLE so the next reconnect attempt is allowed.
@@ -333,13 +345,16 @@ void mqtt_publish_heartbeat(const char *pico_id, int table_id,
 
 void mqtt_publish_rfid(int table_id, const char *pico_id,
                        const char *side, int slot, const char *uid_hex) {
-    char topic[48], body[160];
-    snprintf(topic, sizeof(topic), "tablefootball/table/%d/rfid", table_id);
+    // Reuse the exact topic string _rfid_topic already holds (built once
+    // in mqtt_app_init() from this same table_id) rather than rebuilding
+    // it here — keeps the publish and subscribe paths guaranteed
+    // identical instead of two independently-maintained format strings.
+    char body[160];
     snprintf(body, sizeof(body),
              "{\"v\":1,\"pico_id\":\"%s\",\"table_id\":%d,\"side\":\"%s\","
              "\"slot\":%d,\"uid\":\"%s\",\"event\":\"card_tapped\"}",
              pico_id, table_id, side, slot, uid_hex);
-    _publish(topic, body, 1);
+    _publish(_rfid_topic, body, 1);
 }
 
 void mqtt_publish_state(int table_id, const char *pico_id,

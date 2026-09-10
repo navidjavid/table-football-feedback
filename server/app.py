@@ -202,11 +202,14 @@ def api_register_player():
 
     db.rename_player(player_id, name, register=True)
 
-    # Refresh affected table snapshots so the dashboard updates immediately.
+    # Refresh affected table snapshots so the dashboard AND any seated
+    # Pico update immediately. This used to skip publish_sync — the
+    # dashboard would show the corrected name via SSE, but no Pico would
+    # ever hear about it over the retained `sync` topic until some other
+    # event happened to refresh that table.
     for snap in db.all_table_snapshots():
         if any(t["player_id"] == player_id for t in snap["team_a"] + snap["team_b"]):
-            state.set_table_snapshot(snap["table_id"], snap)
-            state.broadcast("table_state", snap)
+            _refresh_table(snap["table_id"])
     state.broadcast("player_update", {"players": db.list_players_with_stats()})
 
     fresh = db.get_player(player_id)
@@ -399,6 +402,10 @@ def api_admin_start(table_id: int):
     db.update_live_table(
         table_id,
         state="GAME_PLAYING",
+        # Recompute mode instead of leaving whatever the table's mode was
+        # last set to — otherwise a prior 2v2 match's mode can survive
+        # into a freshly-started 1v1 match and get recorded wrong.
+        mode=mqtt_client._compute_mode(team_a, team_b),  # noqa: SLF001
         score_a=0,
         score_b=0,
         fastest_shot=0,
@@ -419,7 +426,15 @@ def api_admin_stop(table_id: int):
     if lt["state"] == "GAME_PLAYING":
         mqtt_client._abandon_match(table_id, reason="admin stop")  # noqa: SLF001
     else:
-        db.update_live_table(table_id, state="WAITING", mode=None, started_at=None)
+        # Also clear the roster/score here, not just the state — stopping
+        # a table sitting in GAME_OVER used to leave the last match's
+        # players/score in place, so the next tap could silently inherit
+        # a stale roster and jump straight into GAME_PLAYING.
+        db.clear_live_players(table_id)
+        db.update_live_table(table_id, state="WAITING", mode=None,
+                             score_a=0, score_b=0, fastest_shot=0,
+                             winner_side=None, winner_player_id=None,
+                             session_id=None, started_at=None)
     _refresh_table(table_id)
     return jsonify({"ok": True})
 
@@ -442,8 +457,21 @@ def api_admin_add_player(table_id: int):
     if not db.get_table(table_id):
         abort(404)
 
-    db.add_live_player(table_id, side, slot, player_id, p["rfid_uid"], None)
     lt = db.get_live_table(table_id)
+    if not lt:
+        abort(404)
+    lt = mqtt_client.clear_stale_roster_if_needed(table_id, lt)
+
+    # A slot already holding a DIFFERENT player used to be silently
+    # overwritten (add_live_player is an upsert on table/side/slot) —
+    # that player just vanished from the roster with no error, no
+    # deregister event logged. Require an explicit remove first instead.
+    occupant = next((r for r in db.get_live_players(table_id)
+                     if r["team_side"] == side and r["slot"] == slot), None)
+    if occupant and occupant["player_id"] != player_id:
+        return jsonify({"error": f"side {side} slot {slot} is already occupied — remove first"}), 400
+
+    db.add_live_player(table_id, side, slot, player_id, p["rfid_uid"], None)
     team_a = [r for r in db.get_live_players(table_id) if r["team_side"] == "A"]
     team_b = [r for r in db.get_live_players(table_id) if r["team_side"] == "B"]
     has_a1 = any(r["slot"] == 1 for r in team_a)
@@ -451,6 +479,8 @@ def api_admin_add_player(table_id: int):
     mode = mqtt_client._compute_mode(team_a, team_b)  # noqa: SLF001
     if lt["state"] != "GAME_PLAYING" and has_a1 and has_b1:
         db.update_live_table(table_id, state="GAME_PLAYING", mode=mode,
+                             score_a=0, score_b=0, fastest_shot=0,
+                             winner_side=None, winner_player_id=None,
                              started_at=db.utc_now())
     else:
         new_state = "PLAYERS_REGISTERING" if lt["state"] != "GAME_PLAYING" else "GAME_PLAYING"
@@ -476,6 +506,18 @@ def api_admin_remove_player(table_id: int):
     lt = db.get_live_table(table_id)
     if lt["state"] == "GAME_PLAYING" and db.count_side(table_id, side) == 0:
         mqtt_client._abandon_match(table_id, reason="admin remove")  # noqa: SLF001
+    elif lt["state"] != "GAME_PLAYING":
+        # Recompute mode/state the same way the RFID-driven deregister
+        # path already does — this used to be skipped here, leaving a
+        # stale mode (e.g. "2v1") on the table after removing the last
+        # player from a side during registration.
+        team_a = [r for r in db.get_live_players(table_id) if r["team_side"] == "A"]
+        team_b = [r for r in db.get_live_players(table_id) if r["team_side"] == "B"]
+        if not team_a and not team_b:
+            db.update_live_table(table_id, state="WAITING", mode=None)
+        else:
+            db.update_live_table(table_id, state="PLAYERS_REGISTERING",
+                                 mode=mqtt_client._compute_mode(team_a, team_b))  # noqa: SLF001
     _refresh_table(table_id)
     return jsonify({"ok": True})
 

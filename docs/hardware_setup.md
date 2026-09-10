@@ -2,10 +2,19 @@
 
 ## Components
 
-- Raspberry Pi Pico 2W (main board)
-- Raspberry Pi Pico 2W (I2C simulator / ball tracker)
+Final deployment is **two identical side boards** (not one main + one
+simulator, as earlier revisions of this doc described) — each is:
+
+- Raspberry Pi Pico 2W
 - PN532 RFID Reader
 - EA DOGL128L-6 Display (128x64 reflective LCD)
+
+Both boards run the same firmware image (only a compile-time `MY_SIDE`/
+`PICO_ROLE_PRIMARY` config differs — see the main README §3) and both
+listen to the same shared I2C bus from an **external ball tracker**
+(built by another team, feeds ball position packets only — see
+`include/i2c_comms.h` for the packet format it must produce). The pin
+tables below apply to each side board identically.
 
 ---
 

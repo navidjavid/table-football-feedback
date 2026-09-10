@@ -39,6 +39,11 @@
 #define TABLE_ID   1
 #define FIRMWARE   "demo-0.3.0"
 
+// Single source for the role label — was duplicated as an inline ternary
+// at both the boot log and the heartbeat publish, risking the two
+// disagreeing if one call site got edited without the other.
+#define ROLE_LABEL (PICO_ROLE_PRIMARY ? "primary" : "secondary")
+
 static char _device_ip[16] = "0.0.0.0";
 static char _session_id[40] = "";
 
@@ -68,6 +73,36 @@ static const char* local_mode_label(const GameData *g) {
 // thread as main() — safe to touch GameData directly.
 // ---------------------------------------------------------------------------
 static GameData *_active_game = NULL;
+
+// Temporary full-screen message shown instead of the normal game render —
+// used by admin "identify"/"show_message" commands. display_manager_show_
+// status() already exists for boot-time status text; reused here rather
+// than adding new display code.
+static char     _override_msg[64] = "";
+static uint32_t _override_until_ms = 0;
+
+// Admin-panel command (Pico Devices controls in the dashboard). The
+// server has published to tablefootball/pico/<pico_id>/cmd since it was
+// first built, but the firmware never subscribed to it at all — every
+// "Identify"/"Reset Match"/"Clear Players"/"Message" button silently did
+// nothing on real hardware. This wires it up.
+static void on_pi_cmd(const char *cmd, const char *message) {
+    printf("[MQTT] Pi cmd: %s\n", cmd);
+    if (strcmp(cmd, "identify") == 0) {
+        snprintf(_override_msg, sizeof(_override_msg), "ID: %s", PICO_ID);
+        _override_until_ms = to_ms_since_boot(get_absolute_time()) + 4000;
+    } else if (strcmp(cmd, "show_message") == 0) {
+        strncpy(_override_msg, message, sizeof(_override_msg) - 1);
+        _override_msg[sizeof(_override_msg) - 1] = '\0';
+        _override_until_ms = to_ms_since_boot(get_absolute_time()) + 5000;
+    } else if (strcmp(cmd, "reset_match") == 0 || strcmp(cmd, "clear_players") == 0) {
+        // GameData doesn't separate "roster" from "match state" — both
+        // commands map to the same local reset; the Pi's own DB-side
+        // bookkeeping for these two differs, but there's nothing further
+        // for this board to do differently between them.
+        if (_active_game) game_init(_active_game);
+    }
+}
 
 // The Pi is the source of truth for player identity; this corrects our
 // locally-guessed name (from the hardcoded demo roster in game_logic.c)
@@ -162,7 +197,7 @@ int main(void) {
     stdio_init_all();
     sleep_ms(2000);
     printf("\n=== Table Football Feedback (side %s, %s) ===\n",
-           MY_SIDE_STR, PICO_ROLE_PRIMARY ? "primary" : "secondary");
+           MY_SIDE_STR, ROLE_LABEL);
 
     // Display is initialized first so boot progress is visible on the
     // cabinet screen, not just over USB serial. Every status write below
@@ -238,6 +273,7 @@ int main(void) {
         mqtt_app_on_player(on_pi_player);
         mqtt_app_on_sync(on_pi_sync);
         mqtt_app_on_rfid(on_pi_rfid);
+        mqtt_app_on_cmd(on_pi_cmd);
 
         display_manager_show_status("Connecting to Pi...");
         // Bounded wait so a missing/unreachable Pi never delays boot —
@@ -348,14 +384,19 @@ int main(void) {
         }
 
         // --- Display every 250ms ---
-        if (loop % 3 == 0)
-            display_manager_render(&game);
+        if (loop % 3 == 0) {
+            if (_override_until_ms && now < _override_until_ms) {
+                display_manager_show_status(_override_msg);
+            } else {
+                _override_until_ms = 0;
+                display_manager_render(&game);
+            }
+        }
 
         // --- Heartbeat every 5s ---
         if (now - last_heartbeat > 5000) {
             last_heartbeat = now;
-            mqtt_publish_heartbeat(PICO_ID, TABLE_ID, MY_SIDE_STR,
-                                   PICO_ROLE_PRIMARY ? "primary" : "secondary",
+            mqtt_publish_heartbeat(PICO_ID, TABLE_ID, MY_SIDE_STR, ROLE_LABEL,
                                    _device_ip, FIRMWARE,
                                    (now - boot_ms) / 1000);
         }

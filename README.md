@@ -2,87 +2,107 @@
 
 A smart foosball table built for the UbiLab university course. The table
 identifies players by RFID, tracks the ball and score in real time, shows
-match status on an on-cabinet LCD, and streams everything live to a
-web dashboard hosted on a Raspberry Pi 4 — no internet connection
+match status on an on-cabinet LCD per side, and streams everything live
+to a web dashboard hosted on a Raspberry Pi 4 — no internet connection
 required, the Pi runs its own WiFi hotspot.
 
 This repo contains **two independently-runnable projects**:
 
 | Part | Where | Runs on | Language |
 |---|---|---|---|
-| Embedded firmware | `src/`, `include/`, `lib/` | Raspberry Pi Pico 2 W | C (Pico SDK) |
+| Embedded firmware | `src/`, `include/`, `lib/` | Raspberry Pi Pico 2 W ×2 | C (Pico SDK) |
 | Server + dashboard | `server/` | Raspberry Pi 4 | Python (Flask) |
 
-The two talk to each other over MQTT, over WiFi, with no wires between
-the Pico and the Pi.
+They talk to each other over MQTT/WiFi — but the two Picos also talk
+**directly to each other** over a shared I2C bus, so registration keeps
+working even with no Pi/WiFi present at all (see §3).
 
 ---
 
 ## 1. System overview
 
 ```
- ┌────────────────────┐        ┌─────────────────────┐        MQTT/WiFi       ┌──────────────────────────────┐
- │  Simulator Pico     │  I2C   │   Main Pico 2 W      │ ───────────────────▶  │        Raspberry Pi 4         │
- │  (ball tracking)    │ ─────▶ │  RFID + game logic   │                       │  WiFi hotspot "TableFootball" │
- │                      │ 9600  │  + LCD display       │ ◀───────────────────  │  Mosquitto MQTT broker        │
- └────────────────────┘ baud   └─────────────────────┘                       │  Flask web app (SSE)          │
-                                                                              │  SQLite (WAL) database        │
-                                                                              └───────────────┬───────────────┘
-                                                                                              │ HTTP / SSE
-                                                                                              ▼
-                                                                                  Any phone/laptop on the
-                                                                                  hotspot — live dashboard,
-                                                                                  player profiles, admin panel
+ ┌──────────────┐                 ┌──────────────────────┐   ┌──────────────────────┐
+ │ Ball tracker │────I2C (shared)▶│  Side A PCB           │   │  Side B PCB           │
+ │ (external,   │────────────────▶│  Pico 2W + RFID +     │◀─▶│  Pico 2W + RFID +     │
+ │  other team) │  both boards    │  display (PRIMARY)    │I2C│  display (SECONDARY)  │
+ └──────────────┘  listen         └───────────┬──────────┘   └──────────┬────────────┘
+                                               │ MQTT/WiFi                │ MQTT/WiFi
+                                               ▼                          ▼
+                                   ┌─────────────────────────────────────────────┐
+                                   │              Raspberry Pi 4                  │
+                                   │  WiFi hotspot "TableFootball"                │
+                                   │  Mosquitto MQTT broker                       │
+                                   │  Flask web app (SSE) + SQLite (WAL)          │
+                                   └───────────────────┬───────────────────────────┘
+                                                       │ HTTP / SSE
+                                                       ▼
+                                           Any phone/laptop on the hotspot —
+                                           live dashboard, player profiles,
+                                           admin panel, tournament brackets
 ```
+
+**Two independent PCBs, one per side** — each has its own Pico 2 W, PN532
+RFID reader, and EA DOGL128 display. Both boards listen to the same
+shared I2C bus from the ball-tracker hardware. Exactly one board is
+configured `PICO_ROLE_PRIMARY` (owns reporting ball position/score/state
+to the Pi); the other only reports its own side's RFID taps + heartbeat —
+this avoids the server ever getting duplicate/racing data from both
+boards for the same table.
 
 **Data flow, end to end:**
 
-1. A player taps an RFID card on the PN532 reader wired to the main Pico.
-2. The main Pico reads the card's UID over SPI, looks it up locally (for
-   the on-cabinet LCD), and publishes the tap over MQTT to the Pi.
-3. The Pi (`mqtt_client.py`) is the **source of truth** for game state —
-   it registers the player against the SQLite database, decides when
-   both sides are full and the match auto-starts, and broadcasts the
-   updated table state to every connected browser via Server-Sent
-   Events (SSE).
-4. A second Pico continuously reports ball x/y/speed/score over I2C to
-   the main Pico, which republishes it over MQTT roughly 12 times a
-   second. The dashboard renders this as a moving dot on a mini pitch.
-5. When the score changes, the main Pico detects the goal locally,
-   updates its LCD, and the next state publish carries the new score to
-   the Pi — which fires a "GOAL!" animation on every connected
-   dashboard.
-6. At game end, the Pi saves the full match (mode, score, players,
-   fastest shot, winner) to SQLite, so it shows up forever after in
-   player profiles and match history.
+1. A player taps an RFID card on either side's own PN532 reader.
+2. That board reads the UID over SPI, registers it locally (own side's
+   roster, up to 2 players for 2v2), and:
+   - broadcasts it directly to the **sibling board** over the shared I2C
+     bus (a board briefly becomes I2C master to send this — see §3),
+     so the other side learns about it **with no Pi/WiFi involved**;
+   - publishes it to the Pi over MQTT, which is authoritative for
+     identity/history — it resolves the UID against its own SQLite
+     database (or creates a guest), decides when the match should
+     start, and echoes the resolved name back.
+3. The primary board republishes ball x/y/speed/score at ~12 Hz from the
+   shared I2C feed; the dashboard renders this as a moving dot on a mini
+   pitch.
+4. Goals are detected locally (baseline-diffed against the ball
+   tracker's own score fields, not trusted directly) on **both** boards
+   independently, each updating its own display; the primary board's
+   published state drives the dashboard's "GOAL!" animation.
+5. At game end, the Pi saves the full match (mode, score, players,
+   fastest shot, winner) to SQLite — shows up in player profiles, match
+   history, and tournament brackets.
+6. If a table gets stuck in `GAME_PLAYING` with no update for 45s (a
+   board crashed/rebooted mid-match), the Pi's own watchdog auto-abandons
+   it — so a later reconnect never resumes a long-dead game.
 
-This demo runs with **one Pico for one table** (not the full two-Pico
-per-table design the protocol supports) — the same Pico's PN532 reader
-takes the first tap as side A and the second as side B.
-
-`[PICTURE: photo of the assembled table — cabinet open, both Picos, PN532, LCD visible]`
-
-`[PICTURE: architecture diagram redrawn as a clean image for slides — see ASCII version above]`
+`[PICTURE: photo of the assembled table — both enclosures, PN532s, LCDs visible]`
 
 ---
 
 ## 2. Physical components & wiring
 
-### Hardware list
+### Hardware list (×2, one set per side)
 
-- **Raspberry Pi Pico 2 W** ×2 — one is the *main* controller (WiFi, RFID,
-  display, game logic), the other is the *simulator/tracker* that feeds
-  ball position over I2C
+- **Raspberry Pi Pico 2 W** — WiFi, RFID, display, local game logic
 - **PN532 NFC/RFID reader module**, configured in **SPI mode** (DIP
   switches: SEL0=OFF, SEL1=ON)
 - **EA DOGL128L-6** graphic LCD, 128×64, reflective (no backlight),
   driven with **bit-banged SPI** (hardware SPI caused timing issues on
   this clone)
+- A custom 3D-printed enclosure (front panel + back shell,
+  `hardware/enclosure/` in a sibling directory to this repo — not
+  version-controlled here) with a display window and a cable
+  pass-through for the shared I2C bus
 - RFID cards, one per player — UID is the player's identity end to end
+
+Plus shared infrastructure:
+- An external **ball-tracker** (built by another team) that writes ball
+  position packets over I2C to both boards
 - **Raspberry Pi 4** (any RAM tier) + microSD (16 GB+) + 5V/3A USB-C
   power supply — runs the WiFi hotspot, MQTT broker, and Flask server
 
-`[PICTURE: each component individually — Pico board, PN532 module with DIP switches labeled, EA DOGL128 display, an RFID card]`
+`[PICTURE: each component individually — Pico board, PN532 module with DIP switches labeled, EA DOGL128 display, an assembled enclosure, an RFID card]`
 
 ### Real-world table dimensions
 
@@ -94,7 +114,7 @@ being sent over MQTT so the same ratio holds end to end.
 
 `[PICTURE: top-down schematic of the table with dimensions labeled, goal positions marked]`
 
-### Pin connections — main Pico
+### Pin connections — per side board
 
 | Component | Signal | Pico GPIO | Physical pin |
 |---|---|---|---|
@@ -109,17 +129,18 @@ being sent over MQTT so the same ratio holds end to end.
 | | A0 (data/cmd) | GP20 | 26 |
 | | RST | GP21 | 27 |
 | | CS1B | GP17 | 22 |
-| I2C bus to simulator Pico | SDA | GP4 | 6 |
+| Shared ball-tracker I2C bus | SDA | GP4 | 6 |
 | | SCL | GP5 | 7 |
 
 The display additionally needs **9 capacitors** for its internal charge
-pump (1µF ceramic ×8 + 4.7µF electrolytic on VOUT) — see
+pump (5×1µF on V0–V4, 3×1µF on the CAP1/2/3 chain, 4.7µF on VOUT) — see
 [`docs/hardware_connections.md`](docs/hardware_connections.md) for the
-full capacitor wiring table, it will not power on without them.
+full, datasheet-verified capacitor wiring table; it will not power on
+without them, and the topology is easy to get wrong (this project did,
+once, before it was corrected).
 
-The I2C bus needs **4.7kΩ pull-ups** on both SDA and SCL (place on
-either board), and both Picos must share a common GND. The simulator
-Pico can be powered straight from the main Pico's VBUS → VSYS.
+The shared I2C bus needs **4.7kΩ pull-ups** on both SDA and SCL, and all
+boards (both side PCBs + the ball tracker) must share a common GND.
 
 `[PICTURE: wiring diagram / breadboard schematic showing all of the above]`
 
@@ -129,15 +150,10 @@ Pico can be powered straight from the main Pico's VBUS → VSYS.
 |---|---|
 | SPI1 (PN532) speed | 1 MHz |
 | I2C0 speed | 9600 baud |
-| I2C slave address | `0x42` |
+| I2C slave address | `0x42` (shared by both side boards — see §3) |
 | Display contrast | `0x13` |
 
 Full pinout reference: [`docs/hardware_connections.md`](docs/hardware_connections.md).
-
-> Note: `lib/mfrc522/` and the MFRC522-based pins mentioned in older
-> docs are **legacy** — the project switched to the PN532 reader. The
-> MFRC522 driver is kept in-tree for reference only and is not built by
-> `CMakeLists.txt`.
 
 ---
 
@@ -147,81 +163,142 @@ Built with the **Pico SDK 2.2.0**, targeting `pico2_w`, using **lwIP in
 polling mode** (`NO_SYS=1` — no RTOS, everything runs from one
 `while(true)` loop with `cyw43_arch_poll()` keeping WiFi/MQTT alive).
 
+The **same firmware image** runs on both side boards — which side/role a
+board plays is a compile-time config block at the top of `src/main.c`:
+
+```c
+#define MY_SIDE            'A'   // 'A' on this board, 'B' on the other
+#define PICO_ROLE_PRIMARY  1     // 1 on exactly ONE board
+#define PICO_ID    "pico-side-a" // must be unique per board
+```
+
+Flip these three, rebuild, and flash the other board.
+
 ### Source layout
 
 | File | Responsibility |
 |---|---|
-| `src/main.c` | WiFi connect, MQTT init, main loop: poll I2C → scan RFID → render display → publish heartbeat/state/ball at their own rates |
+| `src/main.c` | WiFi connect (with on-screen boot status), MQTT init, main loop |
 | `src/rfid_handler.c` + `lib/pn532/pn532.c` | PN532 SPI driver + tap-debounce state machine |
-| `src/i2c_comms.c` | I2C slave — receives ball-position packets into a ring buffer from the simulator Pico |
-| `src/game_logic.c` | Local game state machine (`GAME_REGISTER_P1` → `GAME_REGISTER_P2` → `GAME_PLAYING` → `GAME_OVER`), goal detection, fastest-shot tracking, local known-player lookup table |
+| `src/i2c_comms.c` | Ball-position ring buffer **and** the offline peer-tap link between the two boards (see below) |
+| `src/game_logic.c` | Local game state machine (`GAME_WAITING` → `GAME_PLAYING` → `GAME_OVER`), up to 2 players/side, goal detection, fastest-shot tracking |
 | `src/display_manager.c` + `lib/ea_dogl128/` | Renders game state to the on-cabinet LCD |
-| `src/pico_mqtt.c` + `include/pico_mqtt.h` | Thin wrapper around lwIP's raw MQTT client — connection-state tracking with backoff, publish helpers for heartbeat/RFID/state/ball |
+| `src/pico_mqtt.c` + `include/pico_mqtt.h` | lwIP raw MQTT client wrapper — connects (with a Last-Will-Testament), publishes heartbeat/RFID/state/ball, subscribes to player/sync/rfid/cmd |
 | `lwipopts.h` | lwIP buffer/pool sizing — tuned specifically to survive MQTT's keep-alive timers (see bug notes below) |
 
-### Demo scope (one Pico)
+### Offline board-to-board link (no Pi/WiFi required)
 
-This build runs **one Pico for one table**, not the full two-Pico
-architecture the MQTT protocol is designed for. `main.c` hardcodes
-`PICO_ID = "pico-demo"`, `TABLE_ID = 1`. The same PN532 reader is used
-for both sides: the **first** tap after registration/game-over starts a
-new side-A registration, the **second** tap fills side B and
-auto-starts the match.
+Both boards need to know about **both** sides' registered players, but
+cross-board MQTT sync only works when the Pi is reachable — and the PCBs
+are already assembled with no spare wiring for a dedicated link. Instead,
+the two boards share the same physical I2C bus the ball tracker uses:
 
-### RFID → MQTT flow
+- The ball tracker is the bus's only permanent master, always **writing**
+  to address `0x42`; both boards listen there as slaves (a
+  write-only-broadcast trick — see `include/i2c_comms.h`).
+- When a card taps on one side, that board briefly becomes the I2C
+  master itself (`i2c_slave_deinit()` → write → `i2c_slave_init()`,
+  the Pico SDK's documented idiom for this) and writes a short 9-byte
+  message to that same shared address. The sibling board, still
+  listening normally, receives it — distinguished from ball-data packets
+  purely by a different sync header.
+- Standard I2C multi-master arbitration handles the rare case of
+  colliding with the ball tracker's own write; a lost attempt is simply
+  dropped (a tap is a one-off, low-frequency event, so this is an
+  accepted low-stakes failure mode).
+
+MQTT's `/rfid` topic (subscribed by both boards) is a second, best-effort
+channel carrying the same information when the Pi is present — the I2C
+link is what makes registration work **at all** with no Pi/WiFi.
+
+### RFID → MQTT + I2C flow
 
 1. `rfid_handler_scan()` polls the PN532 over SPI; a debounce window
-   (`NO_CARD_THRESHOLD`) avoids re-firing on the same card sitting on
-   the reader.
+   avoids re-firing on the same card sitting on the reader.
 2. On a fresh tap, `game_lookup_player()` checks a small hardcoded
-   table of known UIDs → names (the demo roster: Alice, Bob, Carol,
-   Dave) purely so the **local LCD** can show a name immediately.
-3. The UID is published to `tablefootball/table/<id>/rfid`. The Pi is
-   the authority — it looks the player up (or creates a guest) in its
-   own SQLite `players` table independently of the Pico's local list.
+   table of known UIDs → names (demo roster: Alice, Bob, Carol, Dave)
+   purely so the **local LCD** can show a name immediately.
+3. The tap is registered locally (own side, next open slot), broadcast
+   to the sibling board over I2C, and published to
+   `tablefootball/table/<id>/rfid`. The Pi is the identity authority —
+   it resolves the UID against its own SQLite `players` table and
+   echoes the resolved name + slot back over
+   `tablefootball/pico/<id>/player`.
 
 ### Ball tracking → MQTT flow
 
-The simulator Pico sends a 20-byte binary packet over I2C
+The ball tracker writes a 20-byte binary packet over I2C
 (`SYNC_A SYNC_B x y prev_x prev_y field_w field_h speed possession
 score_a score_b`, see `include/i2c_comms.h`). `i2c_comms_poll()` drains
-this from a ring buffer filled by an I2C-slave interrupt handler.
-`game_update()` diffs the embedded score against its last-seen baseline
-to detect goals (rather than trusting the simulator's raw score
+this from a ring buffer filled by an I2C-slave interrupt handler — the
+same ring buffer also carries the peer-tap messages above, distinguished
+by sync header. `game_update()` diffs the embedded score against its
+last-seen baseline to detect goals (rather than trusting the raw score
 directly), and the ball position is rescaled to a 0–1000×0–500 grid
-before being published on `tablefootball/table/<id>/ball` at roughly
-12 Hz.
+before the **primary** board publishes it on
+`tablefootball/table/<id>/ball` at roughly 12 Hz.
 
 `[PICTURE: serial console screenshot showing RFID tap + MQTT publish logs]`
 
-### MQTT topics published by the Pico
+### MQTT topics
+
+**Published by each Pico:**
 
 | Topic | Rate | Payload |
 |---|---|---|
 | `tablefootball/pico/<id>/heartbeat` | every 5s | online status, IP, firmware version, uptime |
 | `tablefootball/table/<id>/rfid` | on tap | UID, side, slot |
-| `tablefootball/table/<id>/state` | ~1/s while playing | score, mode, fastest shot, winner (on GAME_OVER) |
-| `tablefootball/table/<id>/ball` | ~12 Hz | x, y, speed |
+| `tablefootball/table/<id>/state` | ~1/s, primary only | score, mode, fastest shot, winner (on GAME_OVER) |
+| `tablefootball/table/<id>/ball` | ~12 Hz, primary only | x, y, speed |
+| `tablefootball/pico/<id>/status` | LWT | `online:false`, set on disconnect |
 
-### Two bugs worth knowing about (and their fixes)
+**Subscribed by each Pico** (the Pi is source of truth for identity/state,
+but the board must never depend on it being reachable — see §"Offline
+board-to-board link" above):
 
-These came up while building this firmware and are good examples of
-how easy it is to silently break shared resources between peripherals:
+| Topic | Purpose |
+|---|---|
+| `tablefootball/pico/<id>/player` | Authoritative name for a resolved tap |
+| `tablefootball/table/<id>/sync` | Full roster + score/state snapshot (retained) — reconciles admin-driven registration changes, which produce no RFID tap at all |
+| `tablefootball/table/<id>/rfid` | The sibling board's own taps (same topic it publishes to) |
+| `tablefootball/pico/<id>/cmd` | Admin-panel commands: identify / reset_match / clear_players / show_message |
+
+### Bugs worth knowing about (and their fixes)
+
+These came up while building this firmware and are good examples of how
+easy it is to silently break shared resources or drop a field across a
+protocol boundary:
 
 1. **I2C bytes dropped during every RFID scan.** `rfid_handler.c`
    disables `I2C0_IRQ` for the duration of `pn532_read_card()` to keep
    the I2C slave handler from interfering with SPI timing. But PN532's
-   internal "wait for ready" polling loop (`_wait_ready()` in
-   `lib/pn532/pn532.c`) can run for up to ~250ms per scan, and the I2C
-   IRQ stayed off that whole time — so every ball-position byte arriving
-   during a card scan was lost. **Fix:** `_wait_ready()` now masks
-   `I2C0_IRQ` only for the few microseconds of the actual SPI status
-   read, and leaves it unmasked during each 1ms sleep in between.
+   internal "wait for ready" polling loop can run for up to ~250ms per
+   scan, and the IRQ stayed off that whole time — so every ball-position
+   byte arriving during a card scan was lost. **Fix:** the wait loop now
+   masks `I2C0_IRQ` only for the few microseconds of the actual SPI
+   status read, unmasked during each 1ms sleep in between.
 2. **`*** PANIC *** sys_timeout` crash.** lwIP's default
-   `MEMP_NUM_SYS_TIMEOUT` pool (auto-sized to ~5) wasn't enough once
-   MQTT's keep-alive timer joined the pool. **Fix:** `lwipopts.h`
-   explicitly sets `MEMP_NUM_SYS_TIMEOUT=16` and bumps `MEM_SIZE`/
-   `MEMP_NUM_TCP_PCB` accordingly.
+   `MEMP_NUM_SYS_TIMEOUT` pool wasn't enough once MQTT's keep-alive timer
+   joined it. **Fix:** `lwipopts.h` explicitly sets it to 16.
+3. **Admin dashboard commands did nothing on real hardware.** The server
+   published to `tablefootball/pico/<id>/cmd` from the start, but the
+   firmware never subscribed to that topic at all — every "Identify" /
+   "Reset Match" / "Message" button silently no-op'd. Fixed by actually
+   subscribing and dispatching (see `on_pi_cmd()` in `main.c`).
+4. **A 2v2 name-correction bug.** The Pi's per-tap name resolution always
+   corrected roster slot 1, no matter which slot the response was
+   actually about — invisible in 1v1 (only one slot exists), but
+   resolving a *second* player's name would silently overwrite the
+   first player's name too. Fixed by having the server include (and the
+   firmware use) the actual slot number in that message.
+5. **A NULL-pointer crash with no Pi present.** If the Pi's hotspot
+   simply doesn't exist at boot, `mqtt_app_init()` is never called, so
+   the internal MQTT client stays `NULL` — but every heartbeat/RFID
+   publish still tried to reconnect through it, crashing on first use.
+   Fixed with a guard so every publish path is a safe no-op with no
+   client. This is exactly the "must work fully offline" requirement,
+   caught by testing the actual no-Pi scenario rather than just a
+   dropped-connection one.
 
 ### Building & flashing
 
@@ -232,13 +309,22 @@ cmake -G Ninja ..
 ninja table-football
 ```
 
-Hold **BOOTSEL**, plug the Pico in (it mounts as a USB drive), then
-drag `build/table-football.uf2` onto it.
+Flip `MY_SIDE`/`PICO_ROLE_PRIMARY`/`PICO_ID` at the top of `src/main.c`
+(see above), rebuild, and repeat for the other side's board.
 
-There's also a separate `test_i2c_simulator` target (`tests/test_i2c_simulator.c`)
-for flashing the second Pico that fakes ball movement over I2C —
-useful for testing the main Pico/dashboard without a real
-camera/sensor rig.
+Hold **BOOTSEL**, plug the Pico in (it mounts as a USB drive), then drag
+`build/table-football.uf2` onto it.
+
+There are also standalone test targets for bringing up hardware in
+isolation without the full stack — useful when debugging a single
+peripheral (see `tests/`):
+
+| Target | Tests |
+|---|---|
+| `test_i2c_simulator` | Fakes ball movement over I2C — a second Pico can stand in for the real ball tracker |
+| `test_pn532` | Raw PN532 SPI bring-up (firmware version + card polling), independent of the rest of the stack |
+| `test_pn532_lib` | Same, using the actual `lib/pn532/pn532.c` driver the main firmware uses |
+| `test_i2c_scan` | Protocol-independent I2C bus scanner (bypasses custom SPI/I2C code entirely — useful for "is this chip even alive" questions) |
 
 ---
 
@@ -262,8 +348,12 @@ cheat-sheet. Summary:
   `WAITING → PLAYERS_REGISTERING → GAME_PLAYING → GAME_OVER / ABANDONED`,
   and writes everything through to SQLite.
 - **SQLite (WAL mode)** — `players`, `live_tables`, `live_players`,
-  `matches`, `match_players`, `pico_devices`, plus unused-but-ready
-  `tournaments`/`tournament_entries`/`tournament_matches` tables.
+  `matches`, `match_players`, `pico_devices`, `tournaments` /
+  `tournament_entries` / `tournament_matches`.
+- **A watchdog thread** — marks a Pico offline after 30s of silent
+  heartbeat, and (separately) auto-abandons a table stuck in
+  `GAME_PLAYING` with no `/state` update for 45s, so a board that
+  crashed mid-match doesn't leave a permanently "live" game behind.
 
 ### Dashboard (`server/static/script.js`, `templates/index.html`)
 
@@ -272,37 +362,32 @@ cheat-sheet. Summary:
 - Real-time via SSE, with an automatic 5-second polling fallback if the
   stream drops.
 - Each table card shows: player name(s) per side (colored pill, with a
-  Guest/Registered badge), live score in large digits, a mini pitch
-  drawn at the table's real 140:76 ratio with goal markers at each end
-  and a live ball dot, best-shot speed, and a winner/abandoned banner.
+  Guest/Registered badge, up to 2 names per side for 2v2), live score in
+  large digits, a mini pitch drawn at the table's real 140:76 ratio with
+  goal markers at each end and a live ball dot, best-shot speed, and a
+  winner/abandoned banner.
 - **Goal celebration:** when a side's score increases, a 2-second
   animated "GOAL!" banner pops over the pitch, colored and named for
-  the scoring side — it survives even the match-winning goal's
-  transition into the game-over view.
+  the scoring side.
+- Clicking a row in the players table opens that player's full profile
+  page (`/player/<uid>`) — match history and a fastest-shot-over-time
+  chart.
 
 `[PICTURE: screenshot of the dashboard mid-match, ideally caught mid-goal-animation]`
 
-### Player profiles & admin
+### Player profiles, admin & tournaments
 
-- Tapping a row in the players table (or visiting `/player/<uid>`)
-  opens a profile: games/wins/losses, best shot, full match history,
+- `/player/<uid>` — games/wins/losses, best shot, full match history,
   and (browser permitting) a fastest-shot-over-time chart.
 - `/admin` — rename guest players into registered ones, watch Pico
-  online/offline status, basic auth via `.env`'s `ADMIN_PASSWORD`.
+  online/offline status, per-Pico commands (identify/reset/clear/message —
+  see §3), and a tournament manager: create a bracket, add entries,
+  auto-generate a single-elimination tree (byes go to the top seeds,
+  never bye-vs-bye), assign a pending match to a live table, and watch
+  it auto-advance as matches finish. Basic auth via `.env`'s
+  `ADMIN_PASSWORD`.
 
-`[PICTURE: screenshot of a player profile page and the admin panel]`
-
-### A bug worth knowing about: stale rosters after GAME_OVER
-
-`live_players` (the per-table roster) used to persist after a match
-ended — kept around on purpose so the GAME_OVER banner could show who
-just played. But that meant the **first** RFID tap of the *next* game
-was misread: the server saw an existing entry for that UID and treated
-the tap as a "deregister" instead of a fresh registration (or, if a
-different player tapped, found the side "full" and silently ignored
-it). **Fix:** in `mqtt_client.py`, any tap arriving while a table is in
-`GAME_OVER`/`ABANDONED` now clears the roster and resets to `WAITING`
-before processing the tap, so the new game always starts clean.
+`[PICTURE: screenshot of a player profile page, the admin panel, and a tournament bracket]`
 
 ### Try it without real Picos
 
@@ -314,23 +399,24 @@ python tests/simulate_rfid.py DBEF7005 A
 
 ---
 
-## 5. Future improvements
+## 5. Known limitations / next steps
 
-- **Scale to the full two-Pico-per-table design** the MQTT protocol
-  already supports (one Pico per side), instead of one Pico handling
-  both sides for this demo.
-- **Self-service player registration** — tap an unknown card and
-  register a name from the dashboard, instead of relying on the
-  hardcoded demo roster (`Alice`/`Bob`/`Carol`/`Dave`) baked into
-  `game_logic.c`.
-- **Offline match sync** — matches played while a Pico is disconnected
-  from the Pi currently never reach match history once it reconnects.
-- **2v2 polish + tournaments** — the `tournaments` tables already exist
-  in the schema; no UI has been built on top of them yet.
-- **Real ball tracking** — replace the I2C simulator Pico with an
-  actual sensor/vision-based tracker reporting the same packet format.
-- **HTTPS / session expiry** — fine on a closed local hotspot, but
-  would need hardening before exposing the admin panel beyond the LAN.
+- **Offline match history sync** — a match played entirely while a Pico
+  is disconnected from the Pi never reaches match history/stats once it
+  reconnects (registration itself works fully offline via the I2C peer
+  link in §3; only the *server-side record* of that match is missing).
+- **Local "tap out" while offline** — tapping an already-seated card is
+  meant to deregister that player (the server already treats a repeat
+  tap this way); the local firmware currently just ignores a repeat tap
+  as a duplicate, so leaving mid-game only works once the Pi is
+  reachable to correct it via `sync`.
+- **Self-service player registration** — a truly unknown card currently
+  becomes a "Guest" automatically; naming a guest still requires the
+  admin panel rather than a prompt on the dashboard itself.
+- **Real ball tracking** — the ball-tracker hardware is owned by another
+  team; this repo only defines the I2C packet format it must produce.
+- **HTTPS / session expiry** — fine on a closed local hotspot, but would
+  need hardening before exposing the admin panel beyond the LAN.
 
 `[PICTURE: optional roadmap graphic]`
 
@@ -344,14 +430,14 @@ table-football/
 │                         game_logic.c, display_manager.c, pico_mqtt.c
 ├── include/              Public headers for the above
 ├── lib/
-│   ├── pn532/            PN532 SPI driver (in use)
-│   ├── ea_dogl128/       EA DOGL128 display driver (in use)
-│   └── mfrc522/          Legacy RFID driver — not built, kept for reference
-├── tests/                Pico-side test harnesses (display, RFID, I2C simulator)
+│   ├── pn532/            PN532 SPI driver
+│   └── ea_dogl128/       EA DOGL128 display driver
+├── tests/                Standalone Pico test harnesses (see §3 table)
 ├── docs/
-│   └── hardware_connections.md   Full pinout + capacitor wiring reference
+│   ├── hardware_connections.md   Full pinout + capacitor wiring reference
+│   └── hardware_setup.md
 ├── lwipopts.h            lwIP buffer/pool sizing (tuned for MQTT keep-alive)
-├── CMakeLists.txt        Builds `table-football` + `test_i2c_simulator`
+├── CMakeLists.txt        Builds table-football + all standalone test targets
 └── server/               Flask + MQTT + SQLite server and dashboard
     ├── app.py, mqtt_client.py, database.py, state.py, config.py
     ├── templates/, static/        Dashboard, player profile, admin UI
@@ -359,6 +445,10 @@ table-football/
     ├── scripts/                   setup_hotspot.sh, backup_db.sh
     └── systemd/                   football.service for boot-time autostart
 ```
+
+The 3D-printable enclosure design (`enclosure.scad` + exported STLs)
+lives in a sibling `hardware/enclosure/` directory outside this repo,
+not version-controlled here.
 
 ## Prerequisites
 
