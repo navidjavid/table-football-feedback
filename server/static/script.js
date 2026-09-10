@@ -284,7 +284,7 @@
       const statusDot = p.status === "Active" ? "dot-ok"
         : p.status === "Waiting" ? "dot-warn" : "dot-bad";
       return `
-        <tr data-id="${p.id}">
+        <tr data-id="${p.id}" data-uid="${escapeHTML(p.rfid_uid)}" style="cursor:pointer">
           <td>${escapeHTML(p.name)} ${badge}</td>
           <td class="uid">${escapeHTML(p.rfid_uid)}</td>
           <td class="num">${p.games}</td>
@@ -295,8 +295,13 @@
         </tr>`;
     }).join("");
 
-    playersBodyEl.querySelectorAll("tr[data-id]").forEach((tr) => {
-      tr.addEventListener("click", () => openPlayerProfile(tr.dataset.id));
+    // Full dedicated page (match history + fastest-shot chart), not the
+    // lighter modal — openPlayerProfile()/the modal are kept only for
+    // the goal-flash popup's own "view profile" affordance elsewhere.
+    playersBodyEl.querySelectorAll("tr[data-uid]").forEach((tr) => {
+      tr.addEventListener("click", () => {
+        window.location.href = "/player/" + encodeURIComponent(tr.dataset.uid);
+      });
     });
   }
 
