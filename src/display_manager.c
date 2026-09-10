@@ -95,8 +95,8 @@ static void render_goal(const GameData *g) {
     }
     dogl128_rect(3, 3, 122, 58);
 
-    // GOAL! in big text
-    dogl128_draw_string_2x(14, 6, "GOAL!");
+    // GOAL! in big text — centered (5 chars * 12px/char at 2x)
+    dogl128_draw_string_2x((128 - 5 * 12) / 2, 6, "GOAL!");
 
     // Scorer
     char label[34];
@@ -108,12 +108,13 @@ static void render_goal(const GameData *g) {
     if (x_center < 0) x_center = 0;
     dogl128_draw_string(x_center, 26, line);
 
-    // Score in 2x
+    // Score in 2x — centered as a group: digit(12) + gap(4) + ':'(6) + gap(4) + digit(12)
     char sa[2] = { '0' + (g->score_a % 10), 0 };
     char sb[2] = { '0' + (g->score_b % 10), 0 };
-    dogl128_draw_char_2x(32, 38, sa[0]);
-    dogl128_draw_string(56, 42, ":");
-    dogl128_draw_char_2x(68, 38, sb[0]);
+    int score_x = (128 - (12 + 4 + 6 + 4 + 12)) / 2;
+    dogl128_draw_char_2x(score_x, 38, sa[0]);
+    dogl128_draw_string(score_x + 12 + 4, 42, ":");
+    dogl128_draw_char_2x(score_x + 12 + 4 + 6 + 4, 38, sb[0]);
 
     // Decorative lines that grow
     int bar_w = (elapsed - 600) * 50 / 1900;
@@ -190,22 +191,28 @@ static void render_game_over(const GameData *g) {
     dogl128_draw_string(36, 4, "GAME OVER");
     dogl128_invert_rect(2, 2, 124, 11);
 
+    // Inner border's bottom edge is at y=62 (2 + 60). 4 info lines at the
+    // old 10px pitch pushed the prompt to y=57, where its 8px-tall text
+    // physically overlapped that border — unreadable, per photo. Tight
+    // 8px pitch (matching the font's own cell height, no padding) fits
+    // all 4 lines plus the prompt with a clear 5px margin above the
+    // border instead.
     char line[40], w[34];
     if (g->winner == 1) game_side_label(g, 'A', w, sizeof(w));
     else if (g->winner == 2) game_side_label(g, 'B', w, sizeof(w));
     else snprintf(w, sizeof(w), "DRAW");
     snprintf(line, sizeof(line), "Winner: %s", w);
-    dogl128_draw_string(8, 17, line);
+    dogl128_draw_string(8, 15, line);
     snprintf(line, sizeof(line), "Final: %d - %d", g->score_a, g->score_b);
-    dogl128_draw_string(8, 27, line);
+    dogl128_draw_string(8, 23, line);
     snprintf(line, sizeof(line), "Fastest: %.1f km/h", g->fastest_kmh);
-    dogl128_draw_string(8, 37, line);
+    dogl128_draw_string(8, 31, line);
     uint32_t sec = (g->game_end_ms - g->game_start_ms) / 1000;
     snprintf(line, sizeof(line), "Time: %02lu:%02lu", sec/60, sec%60);
-    dogl128_draw_string(8, 47, line);
+    dogl128_draw_string(8, 39, line);
     static int b = 0; b++;
     if (b % 2 == 0)
-        dogl128_draw_string(4, 57, "Tap card: new game");
+        dogl128_draw_string(4, 49, "Tap card: new game");
     dogl128_flush();
 }
 
