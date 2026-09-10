@@ -16,8 +16,11 @@ bool mqtt_app_connected(void);
 
 // Authoritative player identity for a tap, echoed back by the Pi in
 // response to a published /rfid event: tablefootball/pico/<pico_id>/player
-// name/side are only valid while seated == true.
-typedef void (*mqtt_player_cb_t)(const char *name, const char *side, bool seated);
+// name/side/slot are only valid while seated == true. slot is 1 or 2 —
+// MUST be used to pick which roster slot to correct (a 2v2 side has two
+// independent slots; blindly correcting "slot 1" for every response
+// corrupts the other slot's name once a side has two players).
+typedef void (*mqtt_player_cb_t)(const char *name, const char *side, int slot, bool seated);
 void mqtt_app_on_player(mqtt_player_cb_t cb);
 
 // One roster slot as reported in a table `sync` snapshot.

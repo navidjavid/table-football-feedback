@@ -150,10 +150,12 @@ static void _route_incoming(const char *topic, const char *payload) {
         char name[24] = "";
         char side[4]  = "";
         bool seated   = false;
+        int  slot     = 0;
         _json_str(payload, "name", name, sizeof(name));
         _json_str(payload, "side", side, sizeof(side));
         _json_bool(payload, "seated", &seated);
-        _player_cb(name, side, seated);
+        _json_int(payload, "slot", &slot);
+        _player_cb(name, side, slot, seated);
     } else if (strcmp(topic, _sync_topic) == 0) {
         if (!_sync_cb) return;
         char state[16] = "";

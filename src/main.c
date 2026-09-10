@@ -74,16 +74,22 @@ static GameData *_active_game = NULL;
 // once it resolves OUR OWN tap against its real database. Note: this only
 // ever fires for taps THIS Pico published — the sibling board's players
 // get their name corrected on the sibling board, not here.
-static void on_pi_player(const char *name, const char *side, bool seated) {
+//
+// BUG FIXED: this used to always overwrite array index 0 (slot 1) no
+// matter which slot the response was actually about. Harmless for 1v1
+// (only one slot ever in use), but for 2v2 — once a side has two
+// players — resolving the SECOND player's name would blindly stomp the
+// FIRST player's name too, since both ended up written to the same
+// slot. The server always sends which slot this response is for; use it.
+static void on_pi_player(const char *name, const char *side, int slot, bool seated) {
     if (!_active_game || !seated || !name[0]) return;
-    // Whichever of our own side's slots currently holds a name-mismatch
-    // guess is unknowable from this message alone (it doesn't carry a
-    // UID), so this only refines slot 1 — the common case for a fresh tap.
     if (side[0] != MY_SIDE) return;
+    if (slot < 1 || slot > MAX_PLAYERS_PER_SIDE) return;
     PlayerSlot *mine = (MY_SIDE == 'A') ? _active_game->side_a : _active_game->side_b;
-    if (!mine[0].filled) return;
-    strncpy(mine[0].name, name, NAME_LEN - 1);
-    mine[0].name[NAME_LEN - 1] = '\0';
+    PlayerSlot *target = &mine[slot - 1];
+    if (!target->filled) return;
+    strncpy(target->name, name, NAME_LEN - 1);
+    target->name[NAME_LEN - 1] = '\0';
 }
 
 // The other side's board publishes its own RFID taps to this same
