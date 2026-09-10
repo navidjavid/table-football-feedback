@@ -323,7 +323,22 @@ int main(void) {
             uid_to_hex(rfid.uid, uid_hex);
             mqtt_publish_rfid(TABLE_ID, PICO_ID, MY_SIDE_STR, next_slot, uid_hex);
 
+            // Tell the sibling board directly over the shared I2C bus —
+            // the only inter-board link that works with no Pi/WiFi present
+            // at all (see i2c_comms.h). MQTT above is best-effort on top
+            // of this, not instead of it.
+            i2c_comms_send_peer_tap(MY_SIDE, (uint8_t)next_slot, rfid.uid);
+
             game_register_player(&game, MY_SIDE, rfid.uid, name);
+        }
+
+        // --- Peer taps from the sibling board (same I2C bus) ---
+        char peer_side; uint8_t peer_slot; uint8_t peer_uid[4];
+        while (i2c_comms_get_peer_tap(&peer_side, &peer_slot, peer_uid)) {
+            if (peer_side == MY_SIDE) continue; // shouldn't happen, ignore defensively
+            const char *peer_name = game_lookup_player(peer_uid);
+            printf("[I2C] Peer tap: side=%c slot=%d\n", peer_side, peer_slot);
+            game_register_player(&game, peer_side, peer_uid, peer_name);
         }
 
         // --- Display every 250ms ---
