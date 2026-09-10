@@ -374,6 +374,20 @@ def stale_picos(cutoff_iso: str) -> list[str]:
     return [r["pico_id"] for r in rows]
 
 
+def stale_playing_tables(cutoff_iso: str) -> list[int]:
+    """Tables stuck in GAME_PLAYING with no state update since cutoff — the
+    primary Pico for that table has gone silent (crash, reboot, disconnect)
+    without ever reporting GAME_OVER/abandoned. Left alone, this state is
+    retained on the `sync` MQTT topic forever, so any board that later
+    reconnects (including its own reboot) inherits a long-dead match
+    instead of starting clean."""
+    rows = get_db().execute(
+        "SELECT table_id FROM live_tables WHERE state = 'GAME_PLAYING' AND updated_at < ?",
+        (cutoff_iso,),
+    ).fetchall()
+    return [r["table_id"] for r in rows]
+
+
 def assign_pico(pico_id: str, table_id: int, side: str, role: str) -> None:
     get_db().execute(
         """

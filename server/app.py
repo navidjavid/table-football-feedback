@@ -29,7 +29,8 @@ import database as db
 import mqtt_client
 import state
 from config import (
-    ADMIN_PASSWORD, BASE_DIR, PICO_OFFLINE_SEC, SECRET_KEY, configure_logging,
+    ADMIN_PASSWORD, BASE_DIR, PICO_OFFLINE_SEC, SECRET_KEY, STALE_MATCH_SEC,
+    configure_logging,
 )
 
 configure_logging()
@@ -626,19 +627,34 @@ def _refresh_table(table_id: int) -> None:
 
 
 def _heartbeat_watchdog() -> None:
-    """Mark Picos offline if they've been silent for too long."""
+    """Mark Picos offline, and abandon matches, after too much silence."""
     while True:
         try:
             time.sleep(5)
-            cutoff = (datetime.now(timezone.utc) - timedelta(seconds=PICO_OFFLINE_SEC))
-            cutoff_iso = cutoff.strftime("%Y-%m-%d %H:%M:%S")
-            stale = db.stale_picos(cutoff_iso)
-            for pico_id in stale:
+            now = datetime.now(timezone.utc)
+
+            pico_cutoff = (now - timedelta(seconds=PICO_OFFLINE_SEC)).strftime("%Y-%m-%d %H:%M:%S")
+            stale_picos = db.stale_picos(pico_cutoff)
+            for pico_id in stale_picos:
                 db.set_pico_online(pico_id, False)
                 state.set_pico_status(pico_id, online=False)
                 state.broadcast("pico_status", {"pico_id": pico_id, "online": False})
                 log.warning("Pico %s marked offline (no heartbeat in %ds)",
                             pico_id, PICO_OFFLINE_SEC)
+
+            # A table stuck in GAME_PLAYING with no /state update in a
+            # while means its primary Pico went silent (crash, reboot,
+            # disconnect) without ever reporting GAME_OVER. Left alone,
+            # that stale state sits on the retained `sync` topic forever,
+            # so any board that later (re)connects — including its own
+            # reboot — inherits a long-dead match instead of starting
+            # clean. Auto-abandon it the same way an admin "stop" would.
+            match_cutoff = (now - timedelta(seconds=STALE_MATCH_SEC)).strftime("%Y-%m-%d %H:%M:%S")
+            for table_id in db.stale_playing_tables(match_cutoff):
+                log.warning("Table %s abandoned (no /state update in %ds)",
+                            table_id, STALE_MATCH_SEC)
+                mqtt_client._abandon_match(table_id, reason="stale, no updates")  # noqa: SLF001
+                _refresh_table(table_id)
         except Exception:  # noqa: BLE001
             log.exception("watchdog tick failed")
 
