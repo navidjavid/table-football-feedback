@@ -4,7 +4,7 @@
 # older than 7 days. Designed for daily cron at 04:00.
 #
 # Crontab entry:
-#   0 4 * * * /home/pi/server/scripts/backup_db.sh
+#   0 4 * * * /home/pi/Desktop/server/scripts/backup_db.sh
 #
 set -euo pipefail
 

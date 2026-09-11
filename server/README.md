@@ -70,7 +70,7 @@ sudo systemctl enable mosquitto
 sudo systemctl restart mosquitto
 
 # 4. Python env
-cd /home/pi/server
+cd /home/pi/Desktop/server
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
@@ -158,7 +158,7 @@ mosquitto_pub -h localhost -t tablefootball/table/1/rfid \
 - **Backup the DB:** run `bash scripts/backup_db.sh` (or wait for the cron entry below).
 - **Daily backups at 04:00:** `crontab -e` and add
   ```
-  0 4 * * * /home/pi/server/scripts/backup_db.sh
+  0 4 * * * /home/pi/Desktop/server/scripts/backup_db.sh
   ```
   Backups live in `server/backups/` and are pruned after 7 days.
 - **Tail logs:** `sudo journalctl -u football -f` or `tail -f logs/server.log`.

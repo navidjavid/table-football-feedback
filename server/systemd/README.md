@@ -27,8 +27,8 @@ log is where you'll find per-message detail at `LOG_LEVEL=DEBUG`.
 
 ## Adjusting paths
 
-The unit assumes the server folder lives at `/home/pi/server` and the
-virtualenv at `/home/pi/server/venv`. If you install elsewhere, edit
+The unit assumes the server folder lives at `/home/pi/Desktop/server` and
+the virtualenv at `/home/pi/Desktop/server/venv`. If you install elsewhere, edit
 `WorkingDirectory`, `EnvironmentFile`, and `ExecStart` accordingly and
 re-run `daemon-reload`.
 
@@ -42,18 +42,18 @@ correctly without `SECRET_KEY` (sessions would reset on every restart).
 
 `SERVER_PORT=80` (the default, see `.env.example`) lets the dashboard be
 reached without a port in the URL, e.g. `http://tb.local`. Only root can
-normally bind ports below 1024, and the service runs as `pi` — grant the
-venv's Python interpreter that one capability instead of running the
-whole app as root:
+normally bind ports below 1024, and the service runs as `pi` — the unit
+grants just that one capability via `AmbientCapabilities=CAP_NET_BIND_
+SERVICE` instead of running the whole app as root. Nothing extra to set
+up: it's already in `football.service`, works with `NoNewPrivileges=true`
+right above it, and survives recreating the venv (unlike `setcap` on the
+python binary, which would need re-applying every time and — since the
+venv's `python3` is a symlink to the system-wide `/usr/bin/python3` —
+would grant the capability to every Python process on the Pi, not just
+this service).
 
-```bash
-sudo setcap 'cap_net_bind_service=+ep' /home/pi/server/venv/bin/python3
-sudo systemctl restart football
-```
-
-Re-run the `setcap` line any time the venv is recreated (a new venv is a
-new binary, so the capability doesn't carry over). Set `SERVER_PORT=5000`
-in `.env` instead if you'd rather skip this and use `:5000` in the URL.
+Set `SERVER_PORT=5000` in `.env` instead if you'd rather skip binding a
+privileged port and use `:5000` in the URL.
 
 ## mosquitto
 
