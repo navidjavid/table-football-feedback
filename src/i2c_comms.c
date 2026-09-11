@@ -76,7 +76,26 @@ void i2c_comms_send_peer_tap(char side, uint8_t slot, const uint8_t uid[4]) {
     // init re-arms slave mode + IRQ. Brief window where we can't receive
     // an incoming ball packet — acceptable, see header note.
     i2c_slave_deinit(I2C_PORT);
-    i2c_write_timeout_us(I2C_PORT, I2C_SLAVE_ADDR, p, sizeof(p), false, 5000);
+
+    // The write's return value used to be discarded entirely, so a failed
+    // send (NACK, arbitration lost to the ball-tracker's own write, bus
+    // busy) was silently indistinguishable from "worked fine" — the
+    // sibling board's roster would just never fill in with no way to tell
+    // why. A tap is a one-off event, so a couple of quick retries costs
+    // nothing and covers the transient case; a real logged failure still
+    // means it's genuinely not getting through.
+    int rc = PICO_ERROR_GENERIC;
+    for (int attempt = 0; attempt < 3 && rc < 0; attempt++) {
+        if (attempt > 0) sleep_us(500);
+        rc = i2c_write_timeout_us(I2C_PORT, I2C_SLAVE_ADDR, p, sizeof(p), false, 5000);
+    }
+    if (rc < 0) {
+        printf("[I2C] Peer-tap send FAILED after retries (rc=%d) side=%c slot=%d\n",
+               rc, side, slot);
+    } else {
+        printf("[I2C] Peer-tap sent OK side=%c slot=%d\n", side, slot);
+    }
+
     i2c_slave_init(I2C_PORT, I2C_SLAVE_ADDR, &_handler);
 }
 
@@ -131,7 +150,12 @@ void i2c_comms_poll(BallData *out) {
 
             uint8_t sum = (uint8_t)(p[2] ^ p[3] ^ p[4] ^ p[5] ^ p[6] ^ p[7]);
             if (sum == p[8]) {
+                printf("[I2C] Peer-tap header seen, checksum OK, side=%c slot=%d\n",
+                       (char)p[2], p[3]);
                 _push_peer_tap((char)p[2], p[3], &p[4]);
+            } else {
+                printf("[I2C] Peer-tap header seen but checksum FAILED (got %02X want %02X)\n",
+                       p[8], sum);
             }
             continue;
         }
