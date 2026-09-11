@@ -77,6 +77,23 @@ void i2c_comms_init(void) {
     i2c_slave_init(I2C_PORT, I2C_SLAVE_ADDR, &_handler);
 }
 
+// Both lines idle (high) is the only safe moment to disable our own slave
+// interface. GPIO_FUNC_I2C still leaves the raw input path readable via
+// gpio_get() regardless of the pin's function-select, so this doesn't
+// require touching the I2C peripheral at all to check. Confirmed cause of
+// a full game freeze in the field: deiniting our slave interface *mid-byte*
+// of an in-flight camera transfer can wedge the shared bus for every
+// device on it (camera + both boards), not just drop our own packet — no
+// write timeout, however generous, fixes that, because the damage is done
+// by the deinit call itself, before the write is ever attempted.
+static bool _bus_idle(void) {
+    for (int i = 0; i < 20; i++) {
+        if (!gpio_get(I2C_SCL_PIN) || !gpio_get(I2C_SDA_PIN)) return false;
+        sleep_us(20);
+    }
+    return true;
+}
+
 void i2c_comms_send_peer_tap(char side, uint8_t slot, const uint8_t uid[4]) {
     uint8_t p[REG_PACKET_SIZE];
     p[0] = REG_SYNC_A;
@@ -86,25 +103,33 @@ void i2c_comms_send_peer_tap(char side, uint8_t slot, const uint8_t uid[4]) {
     p[4] = uid[0]; p[5] = uid[1]; p[6] = uid[2]; p[7] = uid[3];
     p[8] = (uint8_t)(p[2] ^ p[3] ^ p[4] ^ p[5] ^ p[6] ^ p[7]);
 
+    // The camera streams continuously during an active game with near-zero
+    // gaps between frames (see memory: i2c-bus-architecture), so this can
+    // take a little hunting — that's expected, not a bug. Give up after a
+    // bounded budget rather than blocking the game loop indefinitely; the
+    // local tap-in/tap-out still applies to this board either way; the
+    // sibling just won't hear about it from this attempt.
+    uint32_t wait_start = to_ms_since_boot(get_absolute_time());
+    while (!_bus_idle()) {
+        if (to_ms_since_boot(get_absolute_time()) - wait_start > 100) {
+            printf("[I2C] Peer-tap send SKIPPED — bus never went idle side=%c slot=%d\n",
+                   side, slot);
+            return;
+        }
+    }
+
     // Documented idiom (pico/i2c_slave.h): deinit restores master mode,
     // init re-arms slave mode + IRQ. Brief window where we can't receive
-    // an incoming ball packet — acceptable, see header note.
+    // an incoming ball packet — acceptable, see header note. Safe now
+    // because _bus_idle() above already confirmed nothing is mid-transfer.
     i2c_slave_deinit(I2C_PORT);
 
     // The write's return value used to be discarded entirely, so a failed
-    // send (NACK, arbitration lost to the ball-tracker's own write, bus
-    // busy) was silently indistinguishable from "worked fine" — the
-    // sibling board's roster would just never fill in with no way to tell
-    // why.
-    //
-    // The camera streams continuously, so the bus is busy essentially all
-    // the time by design, not just occasionally — a handful of short
-    // retries almost always lands mid-frame and collides again right
-    // away. PEER_TAP_TIMEOUT_US instead gives ONE attempt long enough to
-    // span past a full camera frame and land in the gap after its STOP;
-    // the RP2040 I2C hardware itself waits for bus-idle before issuing
-    // its own START once switched to master mode. Two attempts at that
-    // length is a safety margin, not the primary mechanism.
+    // send (NACK, arbitration lost to the ball-tracker's own write) was
+    // silently indistinguishable from "worked fine" — the sibling board's
+    // roster would just never update with no way to tell why. One retry
+    // for the rare case the camera won the race to START right after we
+    // saw idle.
     int rc = PICO_ERROR_GENERIC;
     for (int attempt = 0; attempt < 2 && rc < 0; attempt++) {
         rc = i2c_write_timeout_us(I2C_PORT, I2C_SLAVE_ADDR, p, sizeof(p), false,

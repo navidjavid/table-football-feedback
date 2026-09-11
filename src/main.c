@@ -368,10 +368,32 @@ int main(void) {
             // Tell the sibling board directly over the shared I2C bus —
             // the only inter-board link that works with no Pi/WiFi present
             // at all (see i2c_comms.h). MQTT above is best-effort on top
-            // of this, not instead of it.
+            // of this, not instead of it. Safe to call regardless of game
+            // state now: i2c_comms_send_peer_tap() itself waits for a
+            // genuinely idle bus before ever touching the I2C peripheral
+            // (see i2c_comms.c) — an earlier version of this skipped the
+            // call entirely during GAME_PLAYING because the naive
+            // deinit/write/reinit dance could wedge the shared bus, but
+            // that made mid-game tap-out impossible to propagate, which
+            // is required (deregistering mid-match must work offline the
+            // same way it already does online via the admin panel).
             i2c_comms_send_peer_tap(MY_SIDE, (uint8_t)next_slot, rfid.uid);
 
-            game_register_player(&game, MY_SIDE, rfid.uid, name);
+            // game_toggle_player(): tapping an already-seated UID again
+            // removes it (offline mirror of the server's own UID-dedup
+            // deregister logic in mqtt_client.py's _handle_rfid/_deregister)
+            // instead of the old "ignore repeat tap" behavior.
+            bool was_playing = (game.state == GAME_PLAYING);
+            bool removed = game_toggle_player(&game, MY_SIDE, rfid.uid, name);
+            if (removed && was_playing && game_side_empty(&game, MY_SIDE)) {
+                // Mirrors the server's own _abandon_match("side emptied") —
+                // that happens independently on the Pi (if online) from the
+                // mqtt_publish_rfid call above; this is just this board's
+                // own local view of the same outcome.
+                display_manager_show_status("Match ended - player left");
+                sleep_ms(1500);
+                game_init(&game);
+            }
         }
 
         // --- Peer taps from the sibling board (same I2C bus) ---
@@ -380,7 +402,13 @@ int main(void) {
             if (peer_side == MY_SIDE) continue; // shouldn't happen, ignore defensively
             const char *peer_name = game_lookup_player(peer_uid);
             printf("[I2C] Peer tap: side=%c slot=%d\n", peer_side, peer_slot);
-            game_register_player(&game, peer_side, peer_uid, peer_name);
+            bool was_playing = (game.state == GAME_PLAYING);
+            bool removed = game_toggle_player(&game, peer_side, peer_uid, peer_name);
+            if (removed && was_playing && game_side_empty(&game, peer_side)) {
+                display_manager_show_status("Match ended - player left");
+                sleep_ms(1500);
+                game_init(&game);
+            }
         }
 
         // --- Display every 250ms ---

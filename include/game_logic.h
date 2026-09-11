@@ -63,6 +63,22 @@ void        game_init(GameData *g);
 // any time afterwards, including mid-game (2v1/1v2 are valid throughout).
 void game_register_player(GameData *g, char side, const uint8_t uid[4],
                            const char *name);
+
+// Tap-to-join / tap-out-to-leave, offline equivalent of the server's own
+// UID-dedup logic in mqtt_client.py's _handle_rfid(): if this UID is
+// already seated on `side`, it's removed (and slot 2 compacts into slot 1
+// if it was the one that left); otherwise it's registered exactly like
+// game_register_player(). No separate "add"/"remove" wire message is
+// needed for this to work over the I2C peer-tap link — both boards reach
+// the same conclusion independently from the same UID+side. Returns true
+// if this call removed a player (so the caller can check game_side_empty()
+// afterwards to detect a mid-match walkover).
+bool game_toggle_player(GameData *g, char side, const uint8_t uid[4],
+                        const char *name);
+
+// True if neither slot on `side` is filled.
+bool game_side_empty(const GameData *g, char side);
+
 void game_update(GameData *g, const BallData *ball);
 bool game_goal_animating(const GameData *g);
 const char* game_state_label(GameState s);

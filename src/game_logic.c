@@ -99,6 +99,40 @@ void game_register_player(GameData *g, char side, const uint8_t uid[4],
     }
 }
 
+bool game_toggle_player(GameData *g, char side, const uint8_t uid[4],
+                        const char *name) {
+    if (side != 'A' && side != 'B') return false;
+
+    PlayerSlot *mine = _side_slots(g, side);
+
+    for (int i = 0; i < MAX_PLAYERS_PER_SIDE; i++) {
+        if (mine[i].filled && memcmp(mine[i].uid, uid, 4) == 0) {
+            printf("[GAME] Side %c slot %d (%s) tapped out\n",
+                   side, i + 1, mine[i].name);
+            mine[i].filled = false;
+            mine[i].name[0] = '\0';
+            memset(mine[i].uid, 0, 4);
+            // A remaining slot-2 player shifts down to slot 1, same as
+            // the server's own db.compact_slots() does for the dashboard.
+            if (i == 0 && mine[1].filled) {
+                mine[0] = mine[1];
+                mine[1].filled = false;
+                mine[1].name[0] = '\0';
+                memset(mine[1].uid, 0, 4);
+            }
+            return true;
+        }
+    }
+
+    game_register_player(g, side, uid, name);
+    return false;
+}
+
+bool game_side_empty(const GameData *g, char side) {
+    const PlayerSlot *slots = (side == 'A') ? g->side_a : g->side_b;
+    return !slots[0].filled && !slots[1].filled;
+}
+
 void game_sync_roster_slot(GameData *g, char side, int slot, bool filled,
                            const char *name, const uint8_t uid[4]) {
     if (side != 'A' && side != 'B') return;
