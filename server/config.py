@@ -43,6 +43,7 @@ MQTT_HOST = _env("MQTT_HOST", "localhost")
 MQTT_PORT = _env_int("MQTT_PORT", 1883)
 
 LOG_LEVEL = _env("LOG_LEVEL", "INFO").upper()
+SERVER_PORT = _env_int("SERVER_PORT", 80)
 MAX_SCORE = _env_int("MAX_SCORE", 10)
 PICO_OFFLINE_SEC = _env_int("PICO_OFFLINE_SEC", 30)
 # Primary Pico publishes /state ~every 1s during play; 45s of silence

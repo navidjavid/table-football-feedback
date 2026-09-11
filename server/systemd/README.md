@@ -38,6 +38,23 @@ re-run `daemon-reload`.
 `ADMIN_PASSWORD` and `SECRET_KEY`. The service refuses to start
 correctly without `SECRET_KEY` (sessions would reset on every restart).
 
+## Binding port 80
+
+`SERVER_PORT=80` (the default, see `.env.example`) lets the dashboard be
+reached without a port in the URL, e.g. `http://tb.local`. Only root can
+normally bind ports below 1024, and the service runs as `pi` — grant the
+venv's Python interpreter that one capability instead of running the
+whole app as root:
+
+```bash
+sudo setcap 'cap_net_bind_service=+ep' /home/pi/server/venv/bin/python3
+sudo systemctl restart football
+```
+
+Re-run the `setcap` line any time the venv is recreated (a new venv is a
+new binary, so the capability doesn't carry over). Set `SERVER_PORT=5000`
+in `.env` instead if you'd rather skip this and use `:5000` in the URL.
+
 ## mosquitto
 
 The broker config lives at `/etc/mosquitto/conf.d/football.conf`:

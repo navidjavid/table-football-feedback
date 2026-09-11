@@ -29,8 +29,8 @@ import database as db
 import mqtt_client
 import state
 from config import (
-    ADMIN_PASSWORD, BASE_DIR, PICO_OFFLINE_SEC, SECRET_KEY, STALE_MATCH_SEC,
-    configure_logging,
+    ADMIN_PASSWORD, BASE_DIR, PICO_OFFLINE_SEC, SECRET_KEY, SERVER_PORT,
+    STALE_MATCH_SEC, configure_logging,
 )
 
 configure_logging()
@@ -720,4 +720,4 @@ _bootstrap()
 if __name__ == "__main__":
     # threaded=True is required: Flask's dev server would otherwise serialize
     # SSE connections behind one another.
-    app.run(host="0.0.0.0", port=5000, threaded=True, debug=False)
+    app.run(host="0.0.0.0", port=SERVER_PORT, threaded=True, debug=False)

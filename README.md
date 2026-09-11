@@ -358,7 +358,7 @@ cheat-sheet. Summary:
 ### Dashboard (`server/static/script.js`, `templates/index.html`)
 
 - One page, no install — any device on the hotspot opens
-  `http://192.168.4.1:5000`.
+  `http://tb.local`.
 - Real-time via SSE, with an automatic 5-second polling fallback if the
   stream drops.
 - Each table card shows: player name(s) per side (colored pill, with a

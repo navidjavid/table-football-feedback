@@ -16,7 +16,7 @@ SQLite database, all starting automatically on boot.
 +----------------+        +-------------+
 
 Hotspot: SSID "TableFootball"  -  192.168.4.1
-Browser: http://192.168.4.1:5000
+Browser: http://tb.local  (or http://192.168.4.1)
 MQTT:    192.168.4.1:1883
 ```
 
@@ -91,8 +91,8 @@ sudo reboot
 ```
 
 After reboot, connect a phone or laptop to the **TableFootball** WiFi
-and open <http://192.168.4.1:5000>. The admin panel is at
-<http://192.168.4.1:5000/admin>.
+and open <http://tb.local>. The admin panel is at
+<http://tb.local/admin>.
 
 ## Running in development (on any machine)
 
