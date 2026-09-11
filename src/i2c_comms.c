@@ -11,6 +11,20 @@
 #define I2C_PORT     i2c0
 #define RING_SIZE    256
 
+// The ball-tracker camera streams continuously at this bus speed — a
+// 20-byte ball packet (I2C_PACKET_SIZE) takes roughly
+// 20 bytes * 9 bits/byte / I2C_BAUD seconds, ~19ms here, essentially
+// back-to-back with little to no idle gap between frames. So the bus
+// isn't "occasionally" busy when a peer-tap send wants it, it is
+// continuously busy by design — a short retry (a few hundred us) almost
+// always lands mid-frame and just collides again immediately. The RP2040
+// I2C hardware itself waits for the bus to go idle (a STOP condition)
+// before issuing its own START once put in master mode, so what actually
+// matters is giving ONE attempt a long enough timeout to span past a
+// full camera frame, not firing off many quick ones.
+#define I2C_BAUD              9600
+#define PEER_TAP_TIMEOUT_US   40000
+
 static volatile uint8_t _ring[RING_SIZE];
 static volatile int     _head = 0;
 static volatile int     _tail = 0;
@@ -55,7 +69,7 @@ static void _handler(i2c_inst_t *i2c, i2c_slave_event_t event) {
 }
 
 void i2c_comms_init(void) {
-    i2c_init(I2C_PORT, 9600);
+    i2c_init(I2C_PORT, I2C_BAUD);
     gpio_set_function(I2C_SDA_PIN, GPIO_FUNC_I2C);
     gpio_set_function(I2C_SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(I2C_SDA_PIN);
@@ -81,13 +95,20 @@ void i2c_comms_send_peer_tap(char side, uint8_t slot, const uint8_t uid[4]) {
     // send (NACK, arbitration lost to the ball-tracker's own write, bus
     // busy) was silently indistinguishable from "worked fine" — the
     // sibling board's roster would just never fill in with no way to tell
-    // why. A tap is a one-off event, so a couple of quick retries costs
-    // nothing and covers the transient case; a real logged failure still
-    // means it's genuinely not getting through.
+    // why.
+    //
+    // The camera streams continuously, so the bus is busy essentially all
+    // the time by design, not just occasionally — a handful of short
+    // retries almost always lands mid-frame and collides again right
+    // away. PEER_TAP_TIMEOUT_US instead gives ONE attempt long enough to
+    // span past a full camera frame and land in the gap after its STOP;
+    // the RP2040 I2C hardware itself waits for bus-idle before issuing
+    // its own START once switched to master mode. Two attempts at that
+    // length is a safety margin, not the primary mechanism.
     int rc = PICO_ERROR_GENERIC;
-    for (int attempt = 0; attempt < 3 && rc < 0; attempt++) {
-        if (attempt > 0) sleep_us(500);
-        rc = i2c_write_timeout_us(I2C_PORT, I2C_SLAVE_ADDR, p, sizeof(p), false, 5000);
+    for (int attempt = 0; attempt < 2 && rc < 0; attempt++) {
+        rc = i2c_write_timeout_us(I2C_PORT, I2C_SLAVE_ADDR, p, sizeof(p), false,
+                                   PEER_TAP_TIMEOUT_US);
     }
     if (rc < 0) {
         printf("[I2C] Peer-tap send FAILED after retries (rc=%d) side=%c slot=%d\n",
