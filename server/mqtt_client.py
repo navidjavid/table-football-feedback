@@ -420,7 +420,7 @@ def _on_connect(client, _userdata, _flags, rc, _properties=None) -> None:
         log.error("MQTT connect failed (rc=%s)", rc)
 
 
-def _on_disconnect(_client, _userdata, rc, _properties=None) -> None:
+def _on_disconnect(_client, _userdata, _disconnect_flags, rc, _properties=None) -> None:
     log.warning("MQTT disconnected (rc=%s)", rc)
     _connected.clear()
 
