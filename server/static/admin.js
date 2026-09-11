@@ -292,9 +292,25 @@
       detail = await getJSON(`/api/tournaments/${expandedTournamentId}`);
     }
 
+    // The periodic 3s poll (see setInterval(refreshAll, ...)) used to blow
+    // away this innerHTML wholesale, resetting any match's "assign to
+    // table" <select> the admin was mid-pick on back to its placeholder —
+    // looked exactly like the dropdown "jumping" back to unselected the
+    // moment you picked something. Capture in-progress selections here and
+    // restore them after the redraw below.
+    const pendingSelections = {};
+    tournamentsList.querySelectorAll("select[data-assign-match]").forEach((sel) => {
+      if (sel.value) pendingSelections[sel.dataset.assignMatch] = sel.value;
+    });
+
     tournamentsList.innerHTML = cachedTournaments.length
       ? cachedTournaments.map((t) => tournamentCard(t, detail)).join("")
       : `<p class="muted">No tournaments yet.</p>`;
+
+    tournamentsList.querySelectorAll("select[data-assign-match]").forEach((sel) => {
+      const prev = pendingSelections[sel.dataset.assignMatch];
+      if (prev && sel.querySelector(`option[value="${prev}"]`)) sel.value = prev;
+    });
 
     tournamentsList.querySelectorAll("[data-t-action]").forEach((el) => {
       el.addEventListener("click", () => onTournamentAction(el));

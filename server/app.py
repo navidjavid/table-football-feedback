@@ -399,6 +399,12 @@ def api_admin_start(table_id: int):
     team_b = [r for r in db.get_live_players(table_id) if r["team_side"] == "B"]
     if not (any(r["slot"] == 1 for r in team_a) and any(r["slot"] == 1 for r in team_b)):
         return jsonify({"error": "both sides need at least slot 1 filled"}), 400
+    # Reset the boards first: a Pico still sitting in GAME_OVER from its
+    # previous match would otherwise ignore this new roster and keep
+    # re-reporting its old GAME_OVER/winner, which the server would then
+    # mistake for this brand-new match already finishing. See
+    # mqtt_client.force_board_reset() for the full failure chain.
+    mqtt_client.force_board_reset(table_id)
     db.update_live_table(
         table_id,
         state="GAME_PLAYING",
@@ -648,6 +654,11 @@ def api_admin_assign_tournament_match(tournament_id: int, tm_id: int):
                          session_id=None, started_at=None)
     db.add_live_player(table_id, "A", 1, entry_a["player_id"], entry_a["rfid_uid"], None)
     db.add_live_player(table_id, "B", 1, entry_b["player_id"], entry_b["rfid_uid"], None)
+    # Same reset-the-boards-first requirement as api_admin_start(): a Pico
+    # stuck in GAME_OVER from whatever it last played would otherwise
+    # immediately re-report that stale result, and the bracket match would
+    # look "finished" before either finalist has tapped in.
+    mqtt_client.force_board_reset(table_id)
     db.update_live_table(table_id, state="GAME_PLAYING", mode="1v1",
                          started_at=db.utc_now())
     db.assign_tournament_match_to_table(tm_id, table_id)

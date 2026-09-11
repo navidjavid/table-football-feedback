@@ -522,6 +522,30 @@ def publish_sync(table_id: int, snap: dict | None = None) -> None:
     )
 
 
+def force_board_reset(table_id: int) -> None:
+    """Publish a synthetic WAITING sync so both Picos reset their LOCAL
+    game object before an admin action jumps a table straight to
+    GAME_PLAYING (admin "Start", tournament match assignment).
+
+    Without this, a board that's still sitting in GAME_OVER from its
+    previous match (nobody has tapped a card since to trigger the
+    tap-driven game_init() reset in game_logic.c) ignores the new
+    roster — game_recheck_start() only fires from GAME_WAITING — and
+    keeps re-publishing its OLD GAME_OVER/winner every ~1s. The server
+    then sees "GAME_OVER" arrive on a table it just marked GAME_PLAYING
+    and immediately calls _finish_match() with that stale data: the new
+    match (or tournament bracket slot) gets "decided" in under a second
+    with nobody having played it.
+
+    on_pi_sync() in main.c already resets cleanly on state=="WAITING" —
+    this just makes sure that message actually gets sent first. Purely
+    a wire message; does not touch the database."""
+    snap = db.table_snapshot(table_id)
+    if not snap:
+        return
+    publish_sync(table_id, {**snap, "state": "WAITING", "team_a": [], "team_b": []})
+
+
 def _send_player_response(pico_id: str | None, uid: str, player, table_id: int) -> None:
     if not pico_id:
         return
