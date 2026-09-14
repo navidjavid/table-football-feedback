@@ -145,7 +145,7 @@ static void render_playing(const GameData *g) {
     char sa[2] = { '0' + (g->score_a % 10), 0 };
     char sb[2] = { '0' + (g->score_b % 10), 0 };
     dogl128_draw_char_2x(28, 12, sa[0]);
-    dogl128_draw_string_2x(50, 12, "-");
+    dogl128_draw_string_2x(54, 12, "-");
     dogl128_draw_char_2x(80, 12, sb[0]);
 
     // Mini field 90x12
