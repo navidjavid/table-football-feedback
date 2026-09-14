@@ -9,6 +9,7 @@
 #include "game_logic.h"
 #include "display_manager.h"
 #include "pico_mqtt.h"
+#include "player_store.h"
 
 // --- WiFi: join the Pi's hotspot ---
 #define WIFI_SSID      "TableFootball"
@@ -102,6 +103,27 @@ static void on_pi_cmd(const char *cmd, const char *message) {
         // for this board to do differently between them.
         if (_active_game) game_init(_active_game);
     }
+}
+
+// Full registered-player directory from the Pi (retained; sent on every
+// heartbeat and via the admin panel's "Sync Players" button). This is
+// what lets an offline tap resolve to a REAL registered name instead of
+// just the 4-entry hardcoded demo list in game_logic.c — previously the
+// "Sync Players" button published this and nothing ever subscribed to
+// it, so it did nothing on real hardware. Persisted to flash (see
+// player_store.h) so the directory survives a power cycle without
+// needing a fresh sync first.
+static void on_pi_players_list(const MqttKnownPlayer *players, int count) {
+    game_clear_known_players();
+    for (int i = 0; i < count; i++) {
+        uint8_t uid[4];
+        if (hex_to_uid(players[i].uid_hex, uid)) {
+            game_set_known_player(uid, players[i].name);
+        }
+    }
+    printf("[MQTT] Known-player directory synced: %d entr%s\n",
+           count, count == 1 ? "y" : "ies");
+    player_store_save(players, count); // no-op if unchanged from flash
 }
 
 // The Pi is the source of truth for player identity; this corrects our
@@ -274,6 +296,7 @@ int main(void) {
         mqtt_app_on_sync(on_pi_sync);
         mqtt_app_on_rfid(on_pi_rfid);
         mqtt_app_on_cmd(on_pi_cmd);
+        mqtt_app_on_players_list(on_pi_players_list);
 
         display_manager_show_status("Connecting to Pi...");
         // Bounded wait so a missing/unreachable Pi never delays boot —
@@ -301,6 +324,26 @@ int main(void) {
     GameData  game;
     game_init(&game);
     _active_game = &game;
+
+    // Reload the last-synced player directory from flash, so a board
+    // powered on with no Wi-Fi at all this session (not just one that
+    // dropped mid-match) still resolves real registered names, not just
+    // the hardcoded demo list. Runs regardless of wifi_ok — this is
+    // exactly the case it exists for.
+    {
+        static MqttKnownPlayer loaded[MAX_KNOWN_PLAYERS];
+        int n = player_store_load(loaded, MAX_KNOWN_PLAYERS);
+        if (n > 0) {
+            game_clear_known_players();
+            for (int i = 0; i < n; i++) {
+                uint8_t uid[4];
+                if (hex_to_uid(loaded[i].uid_hex, uid)) {
+                    game_set_known_player(uid, loaded[i].name);
+                }
+            }
+            printf("[STORE] Loaded %d known player(s) from flash\n", n);
+        }
+    }
 
     BallData  ball       = {0};
     BallData  fresh      = {0};

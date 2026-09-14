@@ -19,18 +19,25 @@ static char _rfid_topic[48];
 static char _cmd_topic[48];
 static const char _will_msg[] = "{\"online\":false}";
 
-static mqtt_player_cb_t _player_cb;
-static mqtt_sync_cb_t   _sync_cb;
-static mqtt_rfid_cb_t   _rfid_cb;
-static mqtt_cmd_cb_t    _cmd_cb;
+// Fixed, not per-pico: the player directory's content is identical for
+// every board, so all boards subscribe to the same shared topic rather
+// than each Pico needing its own copy republished individually.
+static const char _players_list_topic[] = "tablefootball/players_directory";
+
+static mqtt_player_cb_t       _player_cb;
+static mqtt_sync_cb_t         _sync_cb;
+static mqtt_rfid_cb_t         _rfid_cb;
+static mqtt_cmd_cb_t          _cmd_cb;
+static mqtt_players_list_cb_t _players_list_cb;
 
 // Incoming-publish reassembly buffer. lwIP delivers a subscribed
 // message's payload in one or more chunks via _incoming_data_cb();
 // _incoming_publish_cb() tells us which topic the next chunks belong to.
-// Sized for the worst case: a 2v2 `sync` snapshot carries full team_a/
-// team_b rosters (name+uid for up to 4 players) — comfortably over the
-// 256B this used to be sized for back when sync was just state+score.
-#define RX_BUF_SIZE 512
+// Sized for the worst case: the full players_list directory, up to
+// MAX_KNOWN_PLAYERS entries at ~45 bytes of JSON each (uid+name+braces) —
+// comfortably over the 512B this used to be sized for when a 2v2 `sync`
+// snapshot (4 players' worth) was the largest message.
+#define RX_BUF_SIZE 4096
 static char   _rx_topic[48];
 static char   _rx_buf[RX_BUF_SIZE];
 static size_t _rx_len;
@@ -132,6 +139,49 @@ static void _parse_team(const char *json, const char *key, MqttSyncPlayer out[2]
     }
 }
 
+// Parses "players":[{"uid":"...","name":"..."}, ...] — same flat-object
+// spirit as _parse_team() above, but for an array of arbitrary length
+// (the whole registered-player directory) instead of exactly 2 fixed
+// slots. Stops at MAX_KNOWN_PLAYERS; the Pi is expected to have far
+// fewer registered players than that in any real deployment.
+static int _parse_player_list(const char *json, MqttKnownPlayer out[MAX_KNOWN_PLAYERS]) {
+    int count = 0;
+
+    const char *pat = "\"players\":[";
+    const char *arr = strstr(json, pat);
+    if (!arr) return 0;
+    arr += strlen(pat);
+    const char *arr_end = strrchr(arr, ']');
+    if (!arr_end) return 0;
+
+    const char *p = arr;
+    while (p < arr_end && count < MAX_KNOWN_PLAYERS) {
+        const char *obj_start = memchr(p, '{', (size_t)(arr_end - p));
+        if (!obj_start) break;
+        const char *obj_end = memchr(obj_start, '}', (size_t)(arr_end - obj_start));
+        if (!obj_end) break;
+
+        char obj[64];
+        size_t n = (size_t)(obj_end - obj_start) + 1;
+        if (n >= sizeof(obj)) n = sizeof(obj) - 1;
+        memcpy(obj, obj_start, n);
+        obj[n] = '\0';
+
+        char uid[16] = "", name[24] = "";
+        bool have_uid = _json_str(obj, "uid", uid, sizeof(uid)) && uid[0];
+        bool have_name = _json_str(obj, "name", name, sizeof(name)) && name[0];
+        if (have_uid && have_name) {
+            strncpy(out[count].uid_hex, uid, sizeof(out[count].uid_hex) - 1);
+            out[count].uid_hex[sizeof(out[count].uid_hex) - 1] = '\0';
+            strncpy(out[count].name, name, sizeof(out[count].name) - 1);
+            out[count].name[sizeof(out[count].name) - 1] = '\0';
+            count++;
+        }
+        p = obj_end + 1;
+    }
+    return count;
+}
+
 // ---------------------------------------------------------------------------
 // Incoming publish handling (subscribed topics only)
 // ---------------------------------------------------------------------------
@@ -185,6 +235,11 @@ static void _route_incoming(const char *topic, const char *payload) {
         _json_str(payload, "cmd", cmd, sizeof(cmd));
         _json_str(payload, "message", message, sizeof(message));
         _cmd_cb(cmd, message);
+    } else if (strcmp(topic, _players_list_topic) == 0) {
+        if (!_players_list_cb) return;
+        static MqttKnownPlayer players[MAX_KNOWN_PLAYERS];
+        int count = _parse_player_list(payload, players);
+        _players_list_cb(players, count);
     }
 }
 
@@ -210,10 +265,11 @@ static void _sub_request_cb(void *arg, err_t err) {
 }
 
 static void _subscribe_all(void) {
-    mqtt_subscribe(_client, _player_topic, 1, _sub_request_cb, (void *)_player_topic);
-    mqtt_subscribe(_client, _sync_topic,   1, _sub_request_cb, (void *)_sync_topic);
-    mqtt_subscribe(_client, _rfid_topic,   1, _sub_request_cb, (void *)_rfid_topic);
-    mqtt_subscribe(_client, _cmd_topic,    1, _sub_request_cb, (void *)_cmd_topic);
+    mqtt_subscribe(_client, _player_topic,       1, _sub_request_cb, (void *)_player_topic);
+    mqtt_subscribe(_client, _sync_topic,         1, _sub_request_cb, (void *)_sync_topic);
+    mqtt_subscribe(_client, _rfid_topic,         1, _sub_request_cb, (void *)_rfid_topic);
+    mqtt_subscribe(_client, _cmd_topic,          1, _sub_request_cb, (void *)_cmd_topic);
+    mqtt_subscribe(_client, _players_list_topic, 1, _sub_request_cb, (void *)_players_list_topic);
 }
 
 static void _connection_cb(mqtt_client_t *client, void *arg,
@@ -304,6 +360,7 @@ void mqtt_app_on_player(mqtt_player_cb_t cb) { _player_cb = cb; }
 void mqtt_app_on_sync(mqtt_sync_cb_t cb)     { _sync_cb = cb; }
 void mqtt_app_on_rfid(mqtt_rfid_cb_t cb)     { _rfid_cb = cb; }
 void mqtt_app_on_cmd(mqtt_cmd_cb_t cb)       { _cmd_cb = cb; }
+void mqtt_app_on_players_list(mqtt_players_list_cb_t cb) { _players_list_cb = cb; }
 
 // If lwIP has closed the underlying TCP connection behind our back,
 // fall back to LINK_IDLE so the next reconnect attempt is allowed.

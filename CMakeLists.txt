@@ -63,6 +63,7 @@ add_executable(table-football
     src/game_logic.c
     src/display_manager.c
     src/pico_mqtt.c
+    src/player_store.c
 )
 target_include_directories(table-football PRIVATE ${COMMON_INCLUDES})
 pico_set_program_name(table-football "table-football")
@@ -72,6 +73,7 @@ target_link_libraries(table-football
     pico_stdlib
     hardware_spi
     hardware_i2c
+    hardware_flash              # persists the known-player directory
     pico_i2c_slave
     pn532_lib
     ea_dogl128_lib

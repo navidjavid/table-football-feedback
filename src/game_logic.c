@@ -18,7 +18,43 @@ static const KnownPlayer _known[] = {
 };
 static const int _n = sizeof(_known) / sizeof(_known[0]);
 
+// ---------------------------------------------------------------------------
+// Dynamic known-player directory — the Pi's real player database, synced
+// in over MQTT (or reloaded from flash at boot). See game_logic.h.
+// ---------------------------------------------------------------------------
+typedef struct { uint8_t uid[4]; char name[24]; } DynamicPlayer;
+static DynamicPlayer _dynamic[MAX_KNOWN_PLAYERS_LOCAL];
+static int           _dynamic_count = 0;
+
+void game_clear_known_players(void) {
+    _dynamic_count = 0;
+}
+
+void game_set_known_player(const uint8_t uid[4], const char *name) {
+    if (!name || !name[0]) return;
+
+    // Update in place if this UID is already present (a fresh sync
+    // usually calls clear() first, but a one-off correction shouldn't
+    // have to resend the whole directory).
+    for (int i = 0; i < _dynamic_count; i++) {
+        if (memcmp(_dynamic[i].uid, uid, 4) == 0) {
+            strncpy(_dynamic[i].name, name, sizeof(_dynamic[i].name) - 1);
+            _dynamic[i].name[sizeof(_dynamic[i].name) - 1] = '\0';
+            return;
+        }
+    }
+    if (_dynamic_count >= MAX_KNOWN_PLAYERS_LOCAL) return; // directory full, drop silently
+
+    memcpy(_dynamic[_dynamic_count].uid, uid, 4);
+    strncpy(_dynamic[_dynamic_count].name, name, sizeof(_dynamic[_dynamic_count].name) - 1);
+    _dynamic[_dynamic_count].name[sizeof(_dynamic[_dynamic_count].name) - 1] = '\0';
+    _dynamic_count++;
+}
+
 const char* game_lookup_player(const uint8_t uid[4]) {
+    for (int i = 0; i < _dynamic_count; i++)
+        if (memcmp(_dynamic[i].uid, uid, 4) == 0)
+            return _dynamic[i].name;
     for (int i = 0; i < _n; i++)
         if (memcmp(_known[i].uid, uid, 4) == 0)
             return _known[i].name;

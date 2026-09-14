@@ -440,11 +440,15 @@ def _next_guest_name() -> str:
     return f"Guest{next_n}"
 
 
-def get_or_create_player_by_uid(uid: str) -> sqlite3.Row:
-    """Find player by RFID UID, or create a Guest with the next free number."""
+def get_or_create_player_by_uid(uid: str) -> tuple[sqlite3.Row, bool]:
+    """Find player by RFID UID, or create a Guest with the next free number.
+
+    Returns (player, created) — callers that need to know whether this
+    was a genuinely new player (e.g. to push the directory to every Pico
+    immediately) can check the second value instead of re-deriving it."""
     existing = get_player_by_uid(uid)
     if existing:
-        return existing
+        return existing, False
     name = _next_guest_name()
     now = utc_now()
     db = get_db()
@@ -454,7 +458,7 @@ def get_or_create_player_by_uid(uid: str) -> sqlite3.Row:
         (uid, name, now, now),
     )
     log.info("Created guest player %s for UID %s", name, uid)
-    return get_player_by_uid(uid)  # type: ignore[return-value]
+    return get_player_by_uid(uid), True  # type: ignore[return-value]
 
 
 def rename_player(player_id: int, new_name: str, register: bool) -> None:

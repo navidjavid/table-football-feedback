@@ -52,8 +52,27 @@ typedef struct {
     int      winner;   // 0=none 1=side A 2=side B
 } GameData;
 
+// Resolves a UID to a display name. Checks the dynamic known-player
+// directory first (real registered players, synced from the Pi or
+// reloaded from flash — see game_set_known_player()), falling back to
+// the tiny hardcoded demo list below it. Returns NULL if neither knows
+// this UID (the caller then falls back to "Guest").
 const char* game_lookup_player(const uint8_t uid[4]);
 void        game_init(GameData *g);
+
+// The dynamic known-player directory: the Pi's real player database,
+// pushed to every board on each heartbeat and via the admin panel's
+// "Sync Players" button (tablefootball/pico/<id>/players_list), so a
+// tap can resolve to a real registered name even with no Pi reachable
+// at tap time. main.c also reloads this from flash at boot (see
+// player_store.h) so it survives a power cycle without a fresh sync.
+//
+// Call game_clear_known_players() before repopulating from a fresh
+// sync, so a player removed on the server actually disappears here too
+// instead of lingering from a stale entry no longer sent.
+#define MAX_KNOWN_PLAYERS_LOCAL 64
+void game_clear_known_players(void);
+void game_set_known_player(const uint8_t uid[4], const char *name);
 
 // side must be 'A' or 'B'. Fills the next open slot for that side (up to
 // MAX_PLAYERS_PER_SIDE). A repeat tap of a UID already seated on either

@@ -201,6 +201,7 @@ def api_register_player():
         return jsonify({"error": f"another player is already named {name!r}"}), 400
 
     db.rename_player(player_id, name, register=True)
+    mqtt_client.publish_players_directory()
 
     # Refresh affected table snapshots so the dashboard AND any seated
     # Pico update immediately. This used to skip publish_sync — the
@@ -290,7 +291,13 @@ def api_admin_pico_command(pico_id: str):
         return jsonify({"error": "unknown command"}), 400
 
     if cmd == "sync_players":
-        mqtt_client.publish_players_list(pico_id)
+        # The directory is broadcast on one shared topic now, not per
+        # board — this button is a manual "force resend now" rather than
+        # the primary sync path, which is event-driven (see
+        # publish_players_directory()'s callers). pico_id is unused but
+        # kept in the route so the existing per-row admin button still
+        # works without a UI change.
+        mqtt_client.publish_players_directory()
         return jsonify({"ok": True})
 
     payload = {"cmd": cmd}
@@ -540,6 +547,7 @@ def api_admin_rename_player(player_id: int):
     if db.name_collides(name, excluding_id=player_id):
         return jsonify({"error": f"another player already named {name!r}"}), 400
     db.rename_player(player_id, name, register=True)
+    mqtt_client.publish_players_directory()
     state.broadcast("player_update", {"players": db.list_players_with_stats()})
     return jsonify({"ok": True})
 

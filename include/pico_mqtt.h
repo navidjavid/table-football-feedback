@@ -59,6 +59,23 @@ void mqtt_app_on_rfid(mqtt_rfid_cb_t cb);
 typedef void (*mqtt_cmd_cb_t)(const char *cmd, const char *message);
 void mqtt_app_on_cmd(mqtt_cmd_cb_t cb);
 
+// One entry in the full registered-player directory: tablefootball/
+// pico/<pico_id>/players_list, retained, pushed on every heartbeat and
+// via the admin panel's "Sync Players" button. This is the ONLY channel
+// that carries the Pi's real player database — every OTHER channel
+// above only carries whoever happens to be seated right now. Without
+// this, offline name resolution can only ever fall back to the tiny
+// hardcoded demo list in game_logic.c, never a real registered player.
+#define MAX_KNOWN_PLAYERS 64
+
+typedef struct {
+    char uid_hex[16];
+    char name[24];
+} MqttKnownPlayer;
+
+typedef void (*mqtt_players_list_cb_t)(const MqttKnownPlayer *players, int count);
+void mqtt_app_on_players_list(mqtt_players_list_cb_t cb);
+
 // tablefootball/pico/<pico_id>/heartbeat
 void mqtt_publish_heartbeat(const char *pico_id, int table_id,
                              const char *side, const char *role,

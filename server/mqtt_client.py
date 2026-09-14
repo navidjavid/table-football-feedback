@@ -101,7 +101,12 @@ def _handle_heartbeat(payload: dict) -> None:
     )
     state.set_pico_status(pico_id, online=True, last_seen=db.utc_now())
     state.broadcast("pico_status", {"pico_id": pico_id, "online": True})
-    publish_players_list(pico_id)
+    # Player directory is no longer pushed here on every heartbeat (every
+    # ~5s regardless of whether anything changed) — it's pushed once,
+    # immediately, from wherever the players table actually changes (see
+    # publish_players_directory()). A board that just (re)connected still
+    # gets the current directory right away via MQTT's retained-message
+    # delivery on subscribe, no heartbeat needed for that either.
 
 
 def _handle_status_lwt(pico_id: str, payload: dict) -> None:
@@ -149,7 +154,12 @@ def _handle_rfid(table_id: int, payload: dict) -> None:
 
     lt = clear_stale_roster_if_needed(table_id, lt)
 
-    player = db.get_or_create_player_by_uid(uid)
+    player, created = db.get_or_create_player_by_uid(uid)
+    if created:
+        # A never-before-seen card just became a real player row — every
+        # Pico's offline directory is now missing this UID until they
+        # hear about it, so push immediately rather than waiting.
+        publish_players_directory()
 
     existing = db.find_live_player_by_uid(table_id, uid)
     if existing:
@@ -581,9 +591,20 @@ def _send_player_response(pico_id: str | None, uid: str, player, table_id: int) 
     )
 
 
-def publish_players_list(pico_id: str) -> None:
+def publish_players_directory() -> None:
+    """Broadcasts the full registered-player directory to every Pico at
+    once, over a single shared (not per-board) retained topic — the
+    content is identical for every board, so one publish reaches all of
+    them rather than looping per pico_id.
+
+    Call this immediately after any players-table mutation (a new guest
+    created from a fresh tap, a rename/registration) so every board's
+    offline name resolution is current right away, instead of waiting on
+    the next heartbeat. A board that connects later still gets the
+    current directory immediately too, via MQTT's own retained-message
+    delivery on subscribe — no separate "catch up" path is needed."""
     _pub(
-        f"tablefootball/pico/{pico_id}/players_list",
+        "tablefootball/players_directory",
         {"players": db.registered_players_list()},
         qos=1,
         retain=True,

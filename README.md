@@ -144,6 +144,32 @@ boards (both side PCBs + the ball tracker) must share a common GND.
 
 `[PICTURE: wiring diagram / breadboard schematic showing all of the above]`
 
+### PCB layout (KiCad)
+
+The per-side board above is laid out in KiCad as
+[`PCB/ubi_lab.kicad_sch`](PCB/ubi_lab.kicad_sch) +
+[`PCB/ubi_lab.kicad_pcb`](PCB/ubi_lab.kicad_pcb) — open both together in
+**KiCad 10**. It's a two-layer, 1.6 mm board with a **76 × 68 mm** outline,
+carrying a socket footprint for a Pico-family board on the back plus three
+connectors: `J1` (8-pin, PN532, fed from the board's 3.3V rail), `J2`
+(40-pin, EA DOGL128L-6), and `J3` (4-pin, labeled `I2C_SIMULATOR` — VBUS/
+GND/SDA/SCL on pins 1–4, for bench-testing against `test_i2c_simulator`
+before the real ball tracker is wired in). `R1`/`R2` are the 4.7kΩ I2C
+pull-ups called out above.
+
+A few things to confirm before sending a board to fab or assembling one:
+
+- The custom `ubi_lab:RaspberryPi_Pico_Socket_THT` footprint is embedded
+  in the PCB, but its source library isn't in this repo — KiCad will need
+  it to re-sync the PCB from schematic edits.
+- The symbol/footprint say `RaspberryPi_Pico_W`, and the socket
+  footprint's own description also mentions Pico 2 W — double check the
+  exact variant, header orientation, and display-module/connector mating
+  against the physical parts on hand.
+- Schematic and PCB disagree on some capacitor reference designators
+  (e.g. a PCB ref like `1µF7` vs. the schematic's `C` prefix) — run
+  KiCad's ERC/DRC and reconcile annotations before fabrication.
+
 ### Software-side bus configuration
 
 | Parameter | Value |
@@ -433,6 +459,7 @@ table-football/
 │   ├── pn532/            PN532 SPI driver
 │   └── ea_dogl128/       EA DOGL128 display driver
 ├── tests/                Standalone Pico test harnesses (see §3 table)
+├── PCB/                  KiCad schematic + PCB for the per-side controller board (see §2)
 ├── docs/
 │   ├── hardware_connections.md   Full pinout + capacitor wiring reference
 │   └── hardware_setup.md
